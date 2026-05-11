@@ -93,8 +93,12 @@
           ./modules/services/caddy-multi.nix
         ]; };
 
-        # Convenience: federation edge bundle (DNS + MX + ACME)
-        edge = { imports = [
+        # Convenience: federation anchor bundle (DNS + MX + ACME).
+        # 'Anchor' replaces the original 'edge' framing: these boxes ARE the
+        # federation's authoritative outermost point (a stable bind target +
+        # identity anchor), not proxies between internal/external. Naming
+        # decision per architect 2026-05-11.
+        anchor = { imports = [
           ./modules/secrets.nix
           ./modules/dns.nix
           ./modules/certs.nix

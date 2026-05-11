@@ -1,7 +1,7 @@
 # ii/nix — shared NixOS modules for the ii federation
 
 Federation-canonical NixOS modules consumed by federation machines
-(bare metal hosts, edge VMs, future cluster nodes). Two layers:
+(bare metal hosts, anchor VMs, future cluster nodes). Two layers:
 
 - **Federation interface modules** (`modules/*.nix`) — the abstraction
   layer. Encode federation conventions (zone lists, recipient policies,
@@ -72,12 +72,16 @@ inputs.ii-nix.url = "github:ii/nix";
 }
 ```
 
-For the federation edge bundle (DNS + MX + ACME), use the convenience
+For the federation anchor bundle (DNS + MX + ACME), use the convenience
 import:
 
 ```nix
-imports = [ ii-nix.nixosModules.edge ];
+imports = [ ii-nix.nixosModules.anchor ];
 ```
+
+("Anchor" replaces the original "edge" framing — these machines ARE the
+federation's authoritative outermost point, not proxies between
+internal/external. Naming decision recorded 2026-05-11.)
 
 ## Historical note on naming
 
@@ -118,7 +122,7 @@ Two-way cross-reference: that README's §References points back here.
 
 ## Architect review
 
-The 2026-05-11 federation-edge-boxes work added `secrets.nix`,
+The 2026-05-11 federation-anchor-boxes work added `secrets.nix`,
 `dns.nix`, `certs.nix`, `lib/hardening.nix`, `technitium.nix`,
 `maddy.nix`, `acme-dns01.nix` as **sketches pending architect-mgr
 review**. Each module's header comment notes what specifically needs
