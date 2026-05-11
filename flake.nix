@@ -21,9 +21,16 @@
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # sops-nix is transitively bundled by nixosModules.secrets so consumers
+    # get the federation-canonical secrets layer in a single import. Pin
+    # tested-against version here; consumers don't have to remember.
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, disko }:
+  outputs = { self, nixpkgs, disko, sops-nix }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -53,9 +60,13 @@
         domain-users = ./modules/domain-users.nix;
 
         # sops-nix-backed encrypted secrets convention (federation primitive).
-        # Consumers must also import sops-nix.nixosModules.sops into their
-        # machine's module list.
-        secrets = ./modules/secrets.nix;
+        # Bundles sops-nix transitively — a single import wires both.
+        secrets = {
+          imports = [
+            sops-nix.nixosModules.sops
+            ./modules/secrets.nix
+          ];
+        };
 
         # Federation DNS — wraps services.technitium with zone lists,
         # TSIG-from-secrets, ACLs. Consumers import this for the

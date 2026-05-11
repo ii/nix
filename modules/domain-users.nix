@@ -14,21 +14,27 @@
 #   };
 #
 #   ii.users = {
-#     hh   = { uid = 1000; isHuman = true;  isAdmin = true; domains = ["dev"]; sshKeys = [...]; };
+#     # Federation member — uid + sshKeys auto-resolved from GitHub identity:
+#     hh   = { federation = true; isAdmin = true; domains = ["dev"]; };
+#
+#     # Service user (tenant) — manual uid, no federation:
 #     abcs = { uid = 2001; isHuman = false; domains = ["abcs"]; };
 #   };
 #
-# This generates:
-#   - Unix group "dev" (gid 3000) for ii.dev zone
-#   - Unix group "abcs" (gid 3001) for abcs.news zone
-#   - User hh (uid 1000) in groups [dev wheel]
-#   - User abcs (uid 2001) as system user in group [abcs]
-#   - hh gets subdomain hh.ii.dev (because hh is in group dev)
-#   - abcs gets apex abcs.news (because abcs is a domain user)
+# FEDERATION USERS (federation = true):
+#   - uid auto-resolved from `federationRegistry` below (raw GitHub numeric ID)
+#   - sshKeys fetched at runtime from https://github.com/<login>.keys via
+#     services.openssh.authorizedKeysCommand (always-fresh; revocation propagates;
+#     no IFD; no committed snapshot to drift)
+#   - inline `sshKeys = [...]` must be empty (assertion enforces this)
+#   - implicit isHuman = true (assertion enforces — service users can't be
+#     federation; orgs don't have personal SSH keys)
+#   - githubLogin defaults to the attribute name; override only if Unix username
+#     differs from GH login
 #
-# The generated config is available to other modules via:
-#   config.ii.generated.subdomains  — { "hh" = ["hh.ii.dev"]; "abcs" = ["abcs.news"]; }
-#   config.ii.generated.domainMap   — { "dev" = "ii.dev"; "abcs" = "abcs.news"; }
+# Adding a federation member: append to `federationRegistry` with their GH ID:
+#   curl -sS https://api.github.com/users/<login> | jq -r '.id'
+# Append-only; removal requires explicit architectural decision.
 
 { config, lib, pkgs, ... }:
 
@@ -37,30 +43,53 @@ with lib;
 let
   cfg = config.ii;
 
-  # Build short-name -> full-domain map
-  # e.g. { "dev" = "ii.dev"; "abcs" = "abcs.news"; }
-  domainMap = mapAttrs' (fullDomain: domainCfg:
-    let
-      parts = splitString "." fullDomain;
-      short = head parts;
-    in
-    nameValuePair short fullDomain
-  ) cfg.domains;
+  # ===== Federation registry — single source of truth =====
+  # UID = raw GitHub numeric user ID. No offset, no override mechanism (YAGNI
+  # per Gen 1 architect endorsement, director-decided 2026-05-01).
+  federationRegistry = {
+    hh = { uid = 31331; description = "Hippie Hacker"; };
+    # As federation grows, append (architectural decision per addition):
+    #   ash    = { uid = <gh-id>; description = "Ash"; };
+    #   ben    = { uid = <gh-id>; description = "Ben"; };
+  };
 
-  # Reverse: short-name -> domain config
-  domainConfigByShort = mapAttrs' (fullDomain: domainCfg:
-    nameValuePair (head (splitString "." fullDomain)) domainCfg
+  # Resolve a user's githubLogin (explicit or default to attr name)
+  ghLogin = username: userCfg:
+    if userCfg.githubLogin != null then userCfg.githubLogin else username;
+
+  # Federation users get uid + description from the registry; their inline
+  # uid/description are ignored if set. Non-federation users pass through.
+  resolveUser = username: userCfg:
+    if userCfg.federation then
+      let
+        login = ghLogin username userCfg;
+        regEntry = federationRegistry.${login};
+      in
+      userCfg // {
+        uid = regEntry.uid;
+        description =
+          if userCfg.description == "" then regEntry.description else userCfg.description;
+        sshKeys = [];  # runtime fetch; inline list must be empty
+      }
+    else
+      userCfg;
+
+  # Apply federation resolution to every user before computing groups/subdomains
+  resolvedUsers = mapAttrs resolveUser cfg.users;
+
+  # Build short-name -> full-domain map
+  domainMap = mapAttrs' (fullDomain: _:
+    let short = head (splitString "." fullDomain);
+    in nameValuePair short fullDomain
   ) cfg.domains;
 
   # For each user, compute their subdomains
   userSubdomains = mapAttrs (username: userCfg:
     if userCfg.isHuman then
-      # Human users get user.domain for each domain group they're in
       map (short: "${username}.${domainMap.${short}}") userCfg.domains
     else
-      # Service/domain users get the apex domain itself
       map (short: domainMap.${short}) userCfg.domains
-  ) cfg.users;
+  ) resolvedUsers;
 
   # For each user, compute their Unix groups
   userGroups = mapAttrs (username: userCfg:
@@ -70,12 +99,34 @@ let
       baseGroups = optionals userCfg.isHuman [ "users" ];
     in
     domainGroups ++ adminGroups ++ baseGroups ++ userCfg.extraGroups
-  ) cfg.users;
+  ) resolvedUsers;
+
+  # Whether ANY user is a federation member — gates the authorizedKeysCommand
+  hasFederationUsers = any (u: u.federation) (attrValues cfg.users);
+
+  # Runtime SSH-keys fetcher — sshd calls this per login attempt for
+  # federation users. Non-federation users are unaffected (script exits 0
+  # producing no keys → sshd falls through to standard authorized_keys).
+  federationKeysFetcher = pkgs.writeShellScript "federation-authorized-keys" ''
+    set -eu
+    user="$1"
+    # Map Unix username to GH login (defaults to same; override via githubLogin)
+    case "$user" in
+      ${concatStringsSep "\n      "
+        (mapAttrsToList (username: userCfg:
+          if userCfg.federation then
+            ''${username}) login="${ghLogin username userCfg}" ;;''
+          else ""
+        ) cfg.users)}
+      *) exit 0 ;;
+    esac
+    ${pkgs.curl}/bin/curl -fsSL "https://github.com/$login.keys"
+  '';
 
 in
 {
   options.ii = {
-    # ===== Domain declarations =====
+    # ===== Domain declarations (unchanged) =====
     domains = mkOption {
       type = types.attrsOf (types.submodule {
         options = {
@@ -99,13 +150,43 @@ in
       '';
     };
 
-    # ===== User declarations =====
+    # ===== User declarations (federation fields added) =====
     users = mkOption {
       type = types.attrsOf (types.submodule {
         options = {
+          # ----- NEW: federation identity -----
+          federation = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Mark this user as a federation member. When true:
+                - uid auto-resolved from federationRegistry (raw GH numeric ID)
+                - sshKeys fetched at runtime from github.com/<login>.keys
+                - inline sshKeys must be empty (assertion)
+                - isHuman must be true (assertion — orgs aren't federation members)
+                - description defaults from registry if not set
+            '';
+          };
+
+          githubLogin = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              GitHub login for federation identity. Defaults to the user's
+              attribute name when federation=true. Override only if the Unix
+              username differs from the GitHub login.
+            '';
+          };
+
+          # ----- Existing fields (uid now optional for federation users) -----
           uid = mkOption {
-            type = types.int;
-            description = "Unix user ID";
+            type = types.nullOr types.int;
+            default = null;
+            description = ''
+              Unix user ID. Required for non-federation users.
+              For federation users this is auto-resolved from the registry;
+              setting it here is ignored.
+            '';
           };
 
           isHuman = mkOption {
@@ -114,6 +195,7 @@ in
             description = ''
               Human users are interactive (shell, home-manager).
               Non-human users are service accounts (domain users).
+              Must be true for federation=true users.
             '';
           };
 
@@ -136,7 +218,10 @@ in
           sshKeys = mkOption {
             type = types.listOf types.str;
             default = [];
-            description = "SSH public keys for this user";
+            description = ''
+              SSH public keys for this user. MUST be empty for
+              federation=true users (their keys are fetched at runtime).
+            '';
           };
 
           shell = mkOption {
@@ -171,7 +256,7 @@ in
       '';
     };
 
-    # ===== Generated outputs (read-only, used by other modules) =====
+    # ===== Generated outputs (now computed from resolvedUsers) =====
     generated = {
       subdomains = mkOption {
         type = types.attrsOf (types.listOf types.str);
@@ -204,6 +289,46 @@ in
   };
 
   config = mkIf (cfg.domains != {} || cfg.users != {}) {
+    # ===== Assertions: federation invariants =====
+    assertions =
+      (mapAttrsToList (username: userCfg: {
+        assertion = !(userCfg.federation && userCfg.sshKeys != []);
+        message = ''
+          ii.users.${username} has federation=true AND inline sshKeys.
+          Federation users get keys via runtime fetch from GitHub; the
+          inline list must be empty.
+        '';
+      }) cfg.users)
+      ++
+      (mapAttrsToList (username: userCfg: {
+        assertion = !(userCfg.federation && !userCfg.isHuman);
+        message = ''
+          ii.users.${username} has federation=true AND isHuman=false.
+          Federation members are humans (orgs/services don't have personal
+          SSH keys to fetch). Service users use manual uid + no federation flag.
+        '';
+      }) cfg.users)
+      ++
+      (mapAttrsToList (username: userCfg: {
+        assertion =
+          if userCfg.federation then
+            federationRegistry ? ${ghLogin username userCfg}
+          else true;
+        message = ''
+          ii.users.${username} has federation=true but '${ghLogin username userCfg}'
+          is not in federationRegistry. Add their GitHub numeric user ID
+          to federationRegistry in modules/domain-users.nix first.
+            Lookup: curl -sS https://api.github.com/users/${ghLogin username userCfg} | jq -r '.id'
+        '';
+      }) cfg.users)
+      ++
+      (mapAttrsToList (username: userCfg: {
+        assertion = userCfg.federation || userCfg.uid != null;
+        message = ''
+          ii.users.${username}: non-federation users must declare an explicit uid.
+        '';
+      }) cfg.users);
+
     # ===== Generate Unix groups from domains =====
     users.groups = mapAttrs' (fullDomain: domainCfg:
       let short = head (splitString "." fullDomain);
@@ -212,7 +337,7 @@ in
       }
     ) cfg.domains;
 
-    # ===== Generate Unix users =====
+    # ===== Generate Unix users (using resolved federation identities) =====
     users.users = mapAttrs (username: userCfg:
       let
         homeDir =
@@ -231,10 +356,18 @@ in
         extraGroups = userGroups.${username};
         openssh.authorizedKeys.keys = userCfg.sshKeys;
       } // optionalAttrs (!userCfg.isHuman) {
-        # System users need an explicit group
         group = head userCfg.domains;
       }
-    ) cfg.users;
+    ) resolvedUsers;
+
+    # ===== Federation runtime SSH-keys fetcher =====
+    # Only wires services.openssh.authorizedKeysCommand if there's at least
+    # one federation user on this machine; otherwise sshd's default behavior
+    # (read ~/.ssh/authorized_keys per user) is preserved unchanged.
+    services.openssh = mkIf hasFederationUsers {
+      authorizedKeysCommand = "${federationKeysFetcher} %u";
+      authorizedKeysCommandUser = "nobody";
+    };
 
     # ===== Ensure home directories exist with correct permissions =====
     systemd.tmpfiles.rules = concatLists (mapAttrsToList (username: userCfg:
@@ -248,6 +381,6 @@ in
       in [
         "d ${homeDir} ${mode} ${username} ${group} -"
       ]
-    ) cfg.users);
+    ) resolvedUsers);
   };
 }

@@ -137,6 +137,9 @@ in {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnCalendar = cfg.renewalInterval;
+        # Also check 1 minute after boot — catches the case where the box
+        # was down through its scheduled renewal window.
+        OnStartupSec = "1m";
         Persistent = true;
         RandomizedDelaySec = "1h";
       };

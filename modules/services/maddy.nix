@@ -8,8 +8,11 @@
 #
 # DECISIONS BAKED IN (need architect blessing):
 #   - Use upstream services.maddy from nixpkgs as the implementation
-#   - Apply managedRuntime hardening (Maddy is Go — could use staticBinary,
-#     but managedRuntime is safer for any embedded Lua / future plugins)
+#   - Apply staticBinary hardening (Maddy is Go static binary; embedded
+#     gopher-lua is interpreted not JITed, so W^X enforcement is safe).
+#     Consumers can override serviceConfig if a future Lua plugin ever
+#     needs JIT/FFI — no option machinery for that until a real need
+#     emerges (YAGNI).
 #   - Ports: 25 (incoming SMTP), 587 (submission). 465 (SMTPS) optional.
 #   - Hostname comes from networking.fqdn / config.networking.hostName
 #
@@ -89,7 +92,8 @@ in {
     };
 
     # Apply federation hardening profile to the upstream maddy unit
-    systemd.services.maddy.serviceConfig = iiLib.hardening.managedRuntime // {
+    # staticBinary: W^X enforced (Maddy is Go); LockPersonality on
+    systemd.services.maddy.serviceConfig = iiLib.hardening.staticBinary // {
       # Maddy needs to bind ports 25, 465, 587 (all <1024)
       AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
       CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];

@@ -16,19 +16,13 @@
 # Cross-machine secrets enumerate additional recipients per-secret —
 # minimum-privilege, no auto-fanout to all federation machines.
 #
-# CONSUMER REQUIREMENT
-#   This module configures sops-nix options but does NOT pull sops-nix as a
-#   transitive flake input. Consumers must also import sops-nix into their
-#   machine's module list:
+# CONSUMER USAGE — ONE-IMPORT STORY (architect-blessed transitive):
 #
-#     imports = [
-#       sops-nix.nixosModules.sops
-#       ii-nix.nixosModules.secrets
-#     ];
+#     imports = [ ii-nix.nixosModules.secrets ];
 #
-# ARCHITECT TODO: bless this shape; decide whether to pull sops-nix as a
-# transitive flake input here (cleaner consumer story) or keep consumer-
-# responsibility (less invasive).
+# nixosModules.secrets bundles sops-nix.nixosModules.sops transitively
+# via flake.nix, so consumers don't have to remember to add sops-nix.
+# ii/nix's flake.nix pins the tested-against sops-nix version.
 #
 # PROVENANCE
 #   Copied verbatim from iinix nixos/modules/ii-federation/secrets.nix

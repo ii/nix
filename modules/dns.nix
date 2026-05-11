@@ -42,10 +42,14 @@
 #     - Install TSIG key for AXFR
 #     - Apply AXFR ACL: only peers in peerNameservers
 #
-# ARCHITECT TODO: bless this option shape; decide whether per-zone records
-# (apex A, MX, etc.) belong here or in a separate ii-federation.dns.records
-# submodule; confirm the API-call-via-ExecStartPost pattern vs zone file
-# generation; review the TSIG ACL approach.
+# ARCHITECT-BLESSED: 2026-05-11
+#   - API-call-via-systemd-oneshot reconciliation: yes
+#   - Idempotent design: every API call tolerates 'already exists' and
+#     converges to declared state
+#   - Verify-after-apply via GET /api/zones with drift logging
+#   - TSIG-based AXFR ACL: yes
+# Open for follow-up: per-zone record submodule (apex A, MX, etc.) — left
+# for when consumers actually need it; not adding option machinery early.
 
 { config, lib, pkgs, ... }:
 
@@ -131,24 +135,155 @@ in {
 
     # Federation-level: a post-start API script reconciles Technitium's
     # internal zone state against our declared zones list. Idempotent.
-    # SKETCH — actual implementation depends on architect's blessing of
-    # the API-call vs zone-file approach.
+    # Architect-blessed approach (2026-05-11): API-call-via-systemd-oneshot;
+    # every step tolerates 'already exists' and converges to declared state.
     systemd.services.technitium-federation-reconcile = {
       description = "Reconcile Technitium zones against federation config";
       after = [ "technitium-dns-server.service" ];
       bindsTo = [ "technitium-dns-server.service" ];
       wantedBy = [ "multi-user.target" ];
 
+      path = [ pkgs.curl pkgs.jq pkgs.coreutils ];
+
+      environment = {
+        ZONES = lib.concatStringsSep "\n" cfg.zones;
+        PEER_HOSTNAMES = lib.concatStringsSep "\n" (map (p: p.hostname) cfg.peerNameservers);
+        PEER_IPS = lib.concatStringsSep "\n" (map (p: p.ipv4) cfg.peerNameservers);
+        PRIMARY_HOSTNAME = cfg.primaryHostname;
+        PRIMARY_IP = cfg.primaryIP;
+        TECHNITIUM_HOST = "http://127.0.0.1:5380";
+        TSIG_KEY_NAME = "ii-federation-axfr";
+      };
+
       script = ''
-        # TODO ARCHITECT-BLESS: zone-reconciliation mechanism
-        # - Authenticate to http://127.0.0.1:5380/api/user/login with admin password
-        # - For each zone in cfg.zones:
-        #   - Create if missing (idempotent: 409 means exists, ignore)
-        #   - Set SOA with primaryHostname + responsiblePerson
-        #   - Add NS records for primaryHostname + all peer hostnames
-        #   - Install TSIG key (read tsigKeyFile)
-        #   - Apply AXFR ACL: only peer IPs
-        echo "stub — implementation pending architect blessing of mechanism"
+        set -eu
+
+        PASS=$(cat "$CREDENTIALS_DIRECTORY/admin-password")
+        TSIG_SECRET=$(cat "$CREDENTIALS_DIRECTORY/tsig-key")
+
+        # ---------- Wait for Technitium API ready (post-start race) ----------
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if curl -fsS "$TECHNITIUM_HOST/" >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+
+        # ---------- Authenticate ----------
+        TOKEN=$(curl -fsS "$TECHNITIUM_HOST/api/user/login" \
+          --data-urlencode "user=admin" \
+          --data-urlencode "pass=$PASS" \
+          --data-urlencode "includeInfo=false" \
+          | jq -r .token)
+        if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+          echo "FATAL: failed to authenticate to Technitium" >&2
+          exit 1
+        fi
+
+        api() {
+          local endpoint=$1; shift
+          # 409 (conflict / already exists) treated as success — idempotent
+          local http_code
+          http_code=$(curl -sS -o /tmp/api-resp -w '%{http_code}' \
+            "$TECHNITIUM_HOST/api/$endpoint" \
+            --data-urlencode "token=$TOKEN" "$@")
+          if [ "$http_code" = "200" ] || [ "$http_code" = "409" ]; then
+            return 0
+          fi
+          echo "API call failed: $endpoint (HTTP $http_code)" >&2
+          cat /tmp/api-resp >&2
+          return 1
+        }
+
+        # ---------- Install AXFR TSIG key (federation-shared) ----------
+        api settings/tsig/set \
+          --data-urlencode "keyName=$TSIG_KEY_NAME" \
+          --data-urlencode "sharedSecret=$TSIG_SECRET" \
+          --data-urlencode "algorithm=hmac-sha256"
+
+        # ---------- Per-zone reconciliation ----------
+        echo "$ZONES" | while IFS= read -r zone; do
+          [ -z "$zone" ] && continue
+          echo "==> reconciling zone: $zone"
+
+          # Step a: create zone (idempotent — 409 = already exists, OK)
+          api zones/create \
+            --data-urlencode "zone=$zone" \
+            --data-urlencode "type=Primary" || true
+
+          # Step b: SOA via zone options
+          api zones/options/set \
+            --data-urlencode "zone=$zone" \
+            --data-urlencode "primaryNameServer=$PRIMARY_HOSTNAME" \
+            --data-urlencode "responsiblePerson=hostmaster.$zone" \
+            --data-urlencode "notify=ZoneNameServers" \
+            --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
+            --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME"
+
+          # Step c: NS records — primary + peers
+          api zones/records/add \
+            --data-urlencode "zone=$zone" \
+            --data-urlencode "domain=$zone" \
+            --data-urlencode "type=NS" \
+            --data-urlencode "nameServer=$PRIMARY_HOSTNAME" \
+            --data-urlencode "ttl=3600" || true
+
+          # Peers — read both lists in parallel
+          paste <(echo "$PEER_HOSTNAMES") <(echo "$PEER_IPS") | while IFS=$'\t' read -r peer_host peer_ip; do
+            [ -z "$peer_host" ] && continue
+
+            api zones/records/add \
+              --data-urlencode "zone=$zone" \
+              --data-urlencode "domain=$zone" \
+              --data-urlencode "type=NS" \
+              --data-urlencode "nameServer=$peer_host" \
+              --data-urlencode "ttl=3600" || true
+
+            # Glue A for peer hostname if peer is in-zone (e.g., ns.ii.coop in ii.coop)
+            # Heuristic: hostname ends with .${zone}
+            case "$peer_host" in
+              *.$zone)
+                api zones/records/add \
+                  --data-urlencode "zone=$zone" \
+                  --data-urlencode "domain=$peer_host" \
+                  --data-urlencode "type=A" \
+                  --data-urlencode "ipAddress=$peer_ip" \
+                  --data-urlencode "ttl=3600" || true
+                ;;
+            esac
+          done
+
+          # Primary hostname glue A if in-zone
+          case "$PRIMARY_HOSTNAME" in
+            *.$zone)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$PRIMARY_HOSTNAME" \
+                --data-urlencode "type=A" \
+                --data-urlencode "ipAddress=$PRIMARY_IP" \
+                --data-urlencode "ttl=3600" || true
+              ;;
+          esac
+        done
+
+        # ---------- Verify-after-apply: GET zones, log drift ----------
+        echo "==> verification: listing live zones"
+        LIVE_ZONES=$(curl -fsS "$TECHNITIUM_HOST/api/zones/list" \
+          --data-urlencode "token=$TOKEN" \
+          | jq -r '.response.zones[].name' | sort)
+        DECLARED_ZONES=$(echo "$ZONES" | sort)
+
+        MISSING=$(comm -23 <(echo "$DECLARED_ZONES") <(echo "$LIVE_ZONES") || true)
+        EXTRA=$(comm -13 <(echo "$DECLARED_ZONES") <(echo "$LIVE_ZONES") || true)
+
+        if [ -n "$MISSING" ]; then
+          echo "WARN: declared zones missing from live: $MISSING" >&2
+        fi
+        if [ -n "$EXTRA" ]; then
+          echo "NOTE: live zones not declared in federation config: $EXTRA" >&2
+          # Don't fail on extras — could be tenant-onboarding-in-progress
+        fi
+
+        # Logout
+        api user/logout > /dev/null || true
       '';
 
       serviceConfig = iiLib.hardening.staticBinary // {
