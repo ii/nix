@@ -364,8 +364,22 @@ in
     # Only wires services.openssh.authorizedKeysCommand if there's at least
     # one federation user on this machine; otherwise sshd's default behavior
     # (read ~/.ssh/authorized_keys per user) is preserved unchanged.
+    #
+    # IMPORTANT: sshd's safe_path check refuses to invoke AuthorizedKeysCommand
+    # if any parent directory of the script is group/world-writable. NixOS's
+    # /nix/store is mode 1775 (group-writable by nixbld), which fails the
+    # check. We work around by copying the fetcher script to /etc/ssh/ at
+    # activation time — that path has 755 root:root all the way up to /.
+    # (Symlinks don't help: stat() follows them.)
+    system.activationScripts = mkIf hasFederationUsers {
+      federationAuthorizedKeysCommand = ''
+        install -m 0755 -o root -g root \
+          ${federationKeysFetcher} \
+          /etc/ssh/federation-authorized-keys
+      '';
+    };
     services.openssh = mkIf hasFederationUsers {
-      authorizedKeysCommand = "${federationKeysFetcher} %u";
+      authorizedKeysCommand = "/etc/ssh/federation-authorized-keys %u";
       authorizedKeysCommandUser = "nobody";
     };
 
