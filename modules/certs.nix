@@ -97,24 +97,38 @@ in {
       credentialFile = "/run/credentials/acme-dns01.service/dns01-creds";
     };
 
-    # Construct the lego env-file at unit start from the TSIG key
-    systemd.services.acme-dns01.serviceConfig = {
-      LoadCredential = lib.mkAfter [
-        # Same TSIG key as AXFR
-        "tsig-key:${toString dnsCfg.tsigKeyFile}"
-      ];
-      # Build the env-file expected by lego rfc2136 from the TSIG credential
-      ExecStartPre = pkgs.writeShellScript "build-dns01-creds" ''
-        set -euo pipefail
-        TSIG="$(cat $CREDENTIALS_DIRECTORY/tsig-key)"
-        cat > $CREDENTIALS_DIRECTORY/dns01-creds <<EOF
-        RFC2136_NAMESERVER=127.0.0.1:53
-        RFC2136_TSIG_ALGORITHM=hmac-sha256
-        RFC2136_TSIG_KEY=ii-federation-acme
-        RFC2136_TSIG_SECRET=$TSIG
-        EOF
-        chmod 0400 $CREDENTIALS_DIRECTORY/dns01-creds
-      '';
+    # ACME must wait for the federation reconciler to finish — that's what
+    # installs the TSIG key into Technitium and configures the zone to accept
+    # dynamic updates. Without this dependency, first issuance races and the
+    # symptoms are confusing (lego retries on the next timer hit, but the
+    # initial bootstrap looks broken). Per architect's Flag 3 (2026-05-11).
+    systemd.services.acme-dns01 = {
+      after = [ "technitium-federation-reconcile.service" ];
+      wants = [ "technitium-federation-reconcile.service" ];
+
+      # Construct the lego env-file at unit start from the TSIG key
+      serviceConfig = {
+        LoadCredential = lib.mkAfter [
+          # Same TSIG key as AXFR
+          "tsig-key:${toString dnsCfg.tsigKeyFile}"
+        ];
+        # Build the env-file expected by lego rfc2136 from the TSIG credential
+        ExecStartPre = pkgs.writeShellScript "build-dns01-creds" ''
+          set -euo pipefail
+          TSIG="$(cat $CREDENTIALS_DIRECTORY/tsig-key)"
+          cat > $CREDENTIALS_DIRECTORY/dns01-creds <<EOF
+          RFC2136_NAMESERVER=127.0.0.1:53
+          RFC2136_TSIG_ALGORITHM=hmac-sha256
+          RFC2136_TSIG_KEY=ii-federation-acme
+          RFC2136_TSIG_SECRET=$TSIG
+          EOF
+          chmod 0400 $CREDENTIALS_DIRECTORY/dns01-creds
+        '';
+      };
     };
+
+    # Renewal timer should also wait — sequenced dependency chain:
+    # technitium-dns-server → technitium-federation-reconcile → acme-dns01
+    systemd.timers.acme-dns01.timerConfig.OnUnitActiveSec = lib.mkDefault "1d";
   };
 }
