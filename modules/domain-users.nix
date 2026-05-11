@@ -218,7 +218,7 @@ in
         homeDir =
           if userCfg.home != null then userCfg.home
           else if userCfg.isHuman then "/home/${username}"
-          else "/var/lib/${username}";
+          else "/srv/tenants/${username}";
       in
       {
         uid = userCfg.uid;
@@ -242,7 +242,7 @@ in
         homeDir =
           if userCfg.home != null then userCfg.home
           else if userCfg.isHuman then "/home/${username}"
-          else "/var/lib/${username}";
+          else "/srv/tenants/${username}";
         mode = if userCfg.isHuman then "0750" else "0700";
         group = if userCfg.isHuman then "users" else head userCfg.domains;
       in [

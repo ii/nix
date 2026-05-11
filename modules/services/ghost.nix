@@ -50,7 +50,7 @@ in
           dataDir = mkOption {
             type = types.nullOr types.path;
             default = null;
-            description = "Data directory. Defaults to /var/lib/<instance>/ghost";
+            description = "Data directory. Defaults to /srv/tenants/<instance>/ghost";
           };
 
           mail = {
@@ -97,7 +97,7 @@ in
       let
         dataDir = if instanceCfg.dataDir != null
           then instanceCfg.dataDir
-          else "/var/lib/${name}/ghost";
+          else "/srv/tenants/${name}/ghost";
         fromAddr = if instanceCfg.mail.from != ""
           then instanceCfg.mail.from
           else "noreply@${instanceCfg.domain}";
@@ -156,7 +156,7 @@ in
       let
         dataDir = if instanceCfg.dataDir != null
           then instanceCfg.dataDir
-          else "/var/lib/${name}/ghost";
+          else "/srv/tenants/${name}/ghost";
       in [
         "d ${dataDir} 0750 1000 1000 -"
         "d ${dataDir}/content 0750 1000 1000 -"
