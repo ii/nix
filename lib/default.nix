@@ -5,7 +5,7 @@
 
 { lib }:
 
-{
+(import ./hardening.nix { inherit lib; }) // {
   # Given a domain string like "ii.dev", return the short name "dev"
   # Given "abcs.news", return "abcs"
   domainShortName = domain:

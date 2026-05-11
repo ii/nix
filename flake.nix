@@ -47,21 +47,49 @@
       # ============================================================
 
       nixosModules = {
+        # ===== Federation interface modules (the abstraction layer) =====
         # The keystone — generates users, groups, DNS, web, email, TLS
         # from a simple ii.domains + ii.users declaration
         domain-users = ./modules/domain-users.nix;
 
-        # Service modules
+        # sops-nix-backed encrypted secrets convention (federation primitive).
+        # Consumers must also import sops-nix.nixosModules.sops into their
+        # machine's module list.
+        secrets = ./modules/secrets.nix;
+
+        # Federation DNS — wraps services.technitium with zone lists,
+        # TSIG-from-secrets, ACLs. Consumers import this for the
+        # ii-federation.dns.* options.
+        dns = ./modules/dns.nix;
+
+        # Federation wildcard TLS — wraps services.acme-dns01 with
+        # auto-resolved DNS-01 target + shared TSIG key from dns.nix.
+        certs = ./modules/certs.nix;
+
+        # ===== Bare service modules (concrete implementations) =====
         ghost = ./modules/services/ghost.nix;
         smtprelay = ./modules/services/smtprelay.nix;
         caddy-multi = ./modules/services/caddy-multi.nix;
+        technitium = ./modules/services/technitium.nix;
+        maddy = ./modules/services/maddy.nix;
+        acme-dns01 = ./modules/services/acme-dns01.nix;
 
-        # Convenience: import everything
+        # Convenience: import everything legacy + federation
         default = { imports = [
           ./modules/domain-users.nix
           ./modules/services/ghost.nix
           ./modules/services/smtprelay.nix
           ./modules/services/caddy-multi.nix
+        ]; };
+
+        # Convenience: federation edge bundle (DNS + MX + ACME)
+        edge = { imports = [
+          ./modules/secrets.nix
+          ./modules/dns.nix
+          ./modules/certs.nix
+          ./modules/services/technitium.nix
+          ./modules/services/maddy.nix
+          ./modules/services/acme-dns01.nix
         ]; };
       };
 
