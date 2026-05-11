@@ -238,7 +238,7 @@ in {
               --data-urlencode "ttl=3600" || true
 
             # Glue A for peer hostname if peer is in-zone (e.g., ns.ii.coop in ii.coop)
-            # Heuristic: hostname ends with .${zone}
+            # Heuristic: hostname ends with .''${zone}
             case "$peer_host" in
               *.$zone)
                 api zones/records/add \
