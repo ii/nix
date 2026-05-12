@@ -277,10 +277,19 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    # Enable the bare Technitium service with our parameters
+    # Enable the bare Technitium service with our parameters.
+    # dnsServerDomain = system hostname (NOT primaryHostname). Tek's
+    # cluster code uses dnsServerDomain to construct each node's
+    # cluster identity, computed as `<first-segment>.<clusterDomain>`.
+    # If both anchors set dnsServerDomain = "ns.<something>.tld" they
+    # collide as "ns.<clusterDomain>" inside the cluster. System
+    # hostnames (anchor-iad, anchor-ord) are unique per node and
+    # render as "anchor-iad.<clusterDomain>" / "anchor-ord.<clusterDomain>"
+    # — clean separation. SOA mname records still use primaryHostname
+    # via the explicit zones/records/update calls in the reconcile.
     services.technitium = {
       enable = true;
-      dnsServerDomain = cfg.primaryHostname;
+      dnsServerDomain = config.networking.hostName;
       adminPasswordFile = cfg.adminPasswordFile;
       openFirewall = true;
     };
