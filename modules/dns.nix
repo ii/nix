@@ -401,6 +401,22 @@ in {
                 --data-urlencode "user=admin" --data-urlencode "pass=$PASS" \
                 --data-urlencode "includeInfo=false" | jq -r .token)
             fi
+            # Primary must expose its TLS web service to secondaries.
+            # Default (set by ii-nix.modules.services.technitium) is
+            # localhost only — fine for admin UI, but cluster handshake
+            # from secondary needs to reach 53443 over the public
+            # internet. Bind to loopback + the primary's public IP.
+            # The HTTP port shares this list but is firewalled.
+            WS_ADDR_PAYLOAD=$(jq -n --arg ip "$PRIMARY_IP" \
+              '{webServiceLocalAddresses: ["127.0.0.1", $ip]}')
+            WS_HTTP=$(curl -sS -o /tmp/api-resp -w '%{http_code}' \
+              -X POST "$TECHNITIUM_HOST/api/settings/set?token=$TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$WS_ADDR_PAYLOAD")
+            if [ "$WS_HTTP" != "200" ]; then
+              echo "WARN: webServiceLocalAddresses update returned $WS_HTTP" >&2
+              cat /tmp/api-resp >&2
+            fi
             ;;
           secondary)
             if [ "$CLUSTER_STATE" != "true" ]; then
