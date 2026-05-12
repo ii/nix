@@ -243,7 +243,7 @@ in {
       bindsTo = [ "technitium-dns-server.service" ];
       wantedBy = [ "multi-user.target" ];
 
-      path = [ pkgs.curl pkgs.jq pkgs.coreutils ];
+      path = [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep ];
 
       environment = {
         ZONES = lib.concatStringsSep "\n" cfg.zones;
