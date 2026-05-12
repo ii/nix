@@ -63,7 +63,13 @@ let
 
     # Syscalls
     SystemCallArchitectures = "native";
-    SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+    # NOTE: '~@resources' dropped 2026-05-11 after Technitium .NET runtime
+    # crashed with SIGSYS (status 31/SYS) on its first start under the
+    # managedRuntime profile. Architect predicted this in Q5: the .NET
+    # ResourceManager makes setrlimit/prlimit calls that fall in @resources.
+    # @privileged stays excluded (real security value); @resources was
+    # over-restrictive for JIT/managed-runtime services.
+    SystemCallFilter = [ "@system-service" "~@privileged" ];
   };
 
   staticBinary = managedRuntime // {
