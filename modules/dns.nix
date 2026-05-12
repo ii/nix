@@ -100,9 +100,93 @@ in {
       example = [ "ii.coop" "ii.dev" "developing.coop" ];
       description = ''
         Authoritative zones this server hosts. Every federation edge
-        serves every zone (parallel-primary). Per-zone records are
-        managed separately (TBD — likely a per-zone submodule when
-        conventions emerge; for now via Technitium API post-deploy).
+        serves every zone (parallel-primary).
+      '';
+    };
+
+    singleNsZones = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "developing.coop" ];
+      description = ''
+        Zones for which only `primaryHostname` is published as NS —
+        peer nameservers are NOT advertised in the NS RRset. Used to
+        break chicken-and-egg cases where a peer's hostname lives
+        inside the zone itself and hasn't resolved publicly yet. Once
+        the peer hostname's A record propagates, the zone can be
+        moved out of this list and the next reconcile will add the
+        peer NS.
+      '';
+    };
+
+    zoneRecords = mkOption {
+      type = types.attrsOf (types.listOf (types.submodule {
+        options = {
+          name = mkOption {
+            type = types.str;
+            description = "Fully-qualified record name (e.g. \"www.ii.dev\" or \"ii.dev\" for apex).";
+          };
+          type = mkOption {
+            type = types.enum [ "A" "AAAA" "CNAME" "MX" "TXT" "SRV" "CAA" "NS" "PTR" ];
+            description = "DNS record type.";
+          };
+          value = mkOption {
+            type = types.str;
+            description = ''
+              Record value. Format depends on type:
+                A/AAAA: IP literal
+                CNAME/NS/PTR: target hostname (with or without trailing dot)
+                MX: "PRIO HOST" (e.g. "10 mail.example.com")
+                TXT: the text content (no surrounding quotes)
+                CAA: "FLAGS TAG VALUE" (e.g. "0 issue \"letsencrypt.org\"")
+                SRV: "PRIO WEIGHT PORT TARGET"
+            '';
+          };
+          ttl = mkOption {
+            type = types.int;
+            default = 300;
+            description = "TTL in seconds.";
+          };
+        };
+      }));
+      default = { };
+      example = lib.literalExpression ''
+        {
+          "ii.dev" = [
+            { name = "ii.dev"; type = "A"; value = "150.136.176.92"; ttl = 300; }
+            { name = "www.ii.dev"; type = "CNAME"; value = "ii.dev"; ttl = 300; }
+          ];
+        }
+      '';
+      description = ''
+        Per-zone record set, keyed by zone name. SOA + apex NS + glue A
+        records for primary/peer hostnames are added separately by the
+        reconcile script and do NOT need to be listed here. The
+        reconcile pass is additive only — records declared here are
+        added if absent; records on the server that aren't declared
+        are NOT removed (other than apex NS, which IS authoritative
+        per the singleNsZones / peerNameservers config).
+      '';
+    };
+
+    recursion = mkOption {
+      type = types.enum [ "Allow" "Deny" "AllowOnlyForPrivateNetworks" ];
+      default = "Deny";
+      description = ''
+        Whether the DNS server should recursively resolve queries it
+        is not authoritative for. "Allow" makes this a public resolver;
+        combine with the rate-limit options or risk being a DNS-amp
+        attack relay.
+      '';
+    };
+
+    recursionQpmLimit = mkOption {
+      type = types.int;
+      default = 100;
+      description = ''
+        Per-client queries-per-minute limit when recursion=Allow.
+        Applies to clients matched by qpmLimitIPv4PrefixLength /
+        qpmLimitIPv6PrefixLength (defaults: /24 and /56).
       '';
     };
 
@@ -147,12 +231,21 @@ in {
 
       environment = {
         ZONES = lib.concatStringsSep "\n" cfg.zones;
+        SINGLE_NS_ZONES = lib.concatStringsSep "\n" cfg.singleNsZones;
         PEER_HOSTNAMES = lib.concatStringsSep "\n" (map (p: p.hostname) cfg.peerNameservers);
         PEER_IPS = lib.concatStringsSep "\n" (map (p: p.ipv4) cfg.peerNameservers);
         PRIMARY_HOSTNAME = cfg.primaryHostname;
         PRIMARY_IP = cfg.primaryIP;
         TECHNITIUM_HOST = "http://127.0.0.1:5380";
         TSIG_KEY_NAME = "ii-federation-axfr";
+        RECURSION_MODE = cfg.recursion;
+        RECURSION_QPM = toString cfg.recursionQpmLimit;
+        # zone records serialized as TSV (tab-separated): zone<TAB>name<TAB>type<TAB>value<TAB>ttl
+        ZONE_RECORDS_TSV = lib.concatStringsSep "\n"
+          (lib.concatMap (zone:
+            map (r: lib.concatStringsSep "\t" [ zone r.name r.type r.value (toString r.ttl) ])
+              (cfg.zoneRecords.${zone} or [])
+          ) (lib.attrNames cfg.zoneRecords));
       };
 
       script = ''
@@ -199,10 +292,37 @@ in {
           --data-urlencode "sharedSecret=$TSIG_SECRET" \
           --data-urlencode "algorithm=hmac-sha256"
 
+        # ---------- Server-wide settings: TCP-bindable endpoint + recursion ----------
+        # 0.0.0.0:53 only — not [::]:53. Reason: systemd-resolved (if present)
+        # binds specific loopback addresses and on Linux a wildcard bind
+        # conflicts with a same-port specific bind unless the existing
+        # socket has SO_REUSEADDR. Technitium sets SO_REUSEADDR for UDP but
+        # NOT TCP, so [::]:53 with v6only:1 was the only TCP bind that
+        # succeeded — refusing all IPv4 TCP connections. The federation
+        # turns resolved OFF on anchors, so 0.0.0.0:53 now works for both
+        # UDP and TCP, and we don't need a separate IPv6 listener since
+        # OCI Flex anchors have no useful public IPv6 anyway.
+        api settings/set \
+          --data-urlencode "dnsServerLocalEndPoints=0.0.0.0:53" \
+          --data-urlencode "recursion=$RECURSION_MODE" \
+          --data-urlencode "recursionDeniedNetworks=" \
+          --data-urlencode "recursionAllowedNetworks=" \
+          --data-urlencode "qpmLimitRequests=$RECURSION_QPM" \
+          --data-urlencode "qpmLimitErrors=10" \
+          --data-urlencode "qpmLimitSampleMinutes=5" \
+          --data-urlencode "qpmLimitIPv4PrefixLength=24" \
+          --data-urlencode "qpmLimitIPv6PrefixLength=56"
+
         # ---------- Per-zone reconciliation ----------
         echo "$ZONES" | while IFS= read -r zone; do
           [ -z "$zone" ] && continue
           echo "==> reconciling zone: $zone"
+
+          # Determine if zone is single-NS (no peers in NS RRset)
+          IS_SINGLE_NS=0
+          if echo "$SINGLE_NS_ZONES" | grep -qx "$zone"; then
+            IS_SINGLE_NS=1
+          fi
 
           # Step a: create zone (idempotent — 409 = already exists, OK)
           api zones/create \
@@ -218,7 +338,35 @@ in {
             --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
             --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME"
 
-          # Step c: NS records — primary + peers
+          # Compute the authoritative set of NS hostnames for this zone
+          DESIRED_NS=$(printf '%s\n' "$PRIMARY_HOSTNAME")
+          if [ "$IS_SINGLE_NS" = "0" ]; then
+            DESIRED_NS="$DESIRED_NS"$'\n'"$PEER_HOSTNAMES"
+          fi
+          DESIRED_NS=$(echo "$DESIRED_NS" | sed '/^$/d' | sort -u)
+
+          # Step c1: GET current apex NS records and DELETE any not in desired set
+          # (authoritative reconcile — handles renames like ns.sharing.io -> ns.developing.coop)
+          CURRENT_NS=$(curl -fsS "$TECHNITIUM_HOST/api/zones/records/get" \
+            --data-urlencode "token=$TOKEN" \
+            --data-urlencode "domain=$zone" \
+            --data-urlencode "zone=$zone" \
+            --data-urlencode "listZone=false" \
+            | jq -r '.response.records[] | select(.type=="NS") | .rData.nameServer' \
+            | sed 's/\.$//' | sort -u)
+
+          STALE_NS=$(comm -23 <(echo "$CURRENT_NS") <(echo "$DESIRED_NS"))
+          echo "$STALE_NS" | while IFS= read -r stale_ns; do
+            [ -z "$stale_ns" ] && continue
+            echo "  - removing stale NS: $stale_ns"
+            api zones/records/delete \
+              --data-urlencode "zone=$zone" \
+              --data-urlencode "domain=$zone" \
+              --data-urlencode "type=NS" \
+              --data-urlencode "nameServer=$stale_ns" || true
+          done
+
+          # Step c2: ADD primary NS (idempotent)
           api zones/records/add \
             --data-urlencode "zone=$zone" \
             --data-urlencode "domain=$zone" \
@@ -226,32 +374,32 @@ in {
             --data-urlencode "nameServer=$PRIMARY_HOSTNAME" \
             --data-urlencode "ttl=3600" || true
 
-          # Peers — read both lists in parallel
-          paste <(echo "$PEER_HOSTNAMES") <(echo "$PEER_IPS") | while IFS=$'\t' read -r peer_host peer_ip; do
-            [ -z "$peer_host" ] && continue
+          # Step c3: ADD peer NS records and any in-zone glue (skip if single-NS)
+          if [ "$IS_SINGLE_NS" = "0" ]; then
+            paste <(echo "$PEER_HOSTNAMES") <(echo "$PEER_IPS") | while IFS=$'\t' read -r peer_host peer_ip; do
+              [ -z "$peer_host" ] && continue
 
-            api zones/records/add \
-              --data-urlencode "zone=$zone" \
-              --data-urlencode "domain=$zone" \
-              --data-urlencode "type=NS" \
-              --data-urlencode "nameServer=$peer_host" \
-              --data-urlencode "ttl=3600" || true
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$zone" \
+                --data-urlencode "type=NS" \
+                --data-urlencode "nameServer=$peer_host" \
+                --data-urlencode "ttl=3600" || true
 
-            # Glue A for peer hostname if peer is in-zone (e.g., ns.ii.coop in ii.coop)
-            # Heuristic: hostname ends with .''${zone}
-            case "$peer_host" in
-              *.$zone)
-                api zones/records/add \
-                  --data-urlencode "zone=$zone" \
-                  --data-urlencode "domain=$peer_host" \
-                  --data-urlencode "type=A" \
-                  --data-urlencode "ipAddress=$peer_ip" \
-                  --data-urlencode "ttl=3600" || true
-                ;;
-            esac
-          done
+              case "$peer_host" in
+                *.$zone)
+                  api zones/records/add \
+                    --data-urlencode "zone=$zone" \
+                    --data-urlencode "domain=$peer_host" \
+                    --data-urlencode "type=A" \
+                    --data-urlencode "ipAddress=$peer_ip" \
+                    --data-urlencode "ttl=3600" || true
+                  ;;
+              esac
+            done
+          fi
 
-          # Primary hostname glue A if in-zone
+          # Primary hostname glue A if in-zone (e.g. ns.ii.coop in ii.coop)
           case "$PRIMARY_HOSTNAME" in
             *.$zone)
               api zones/records/add \
@@ -260,6 +408,94 @@ in {
                 --data-urlencode "type=A" \
                 --data-urlencode "ipAddress=$PRIMARY_IP" \
                 --data-urlencode "ttl=3600" || true
+              ;;
+          esac
+        done
+
+        # ---------- Per-record reconciliation (additive) ----------
+        # ZONE_RECORDS_TSV format: zone<TAB>name<TAB>type<TAB>value<TAB>ttl
+        # 409 (already exists) is OK; we are additive only.
+        echo "$ZONE_RECORDS_TSV" | while IFS=$'\t' read -r zone name type value ttl; do
+          [ -z "$zone" ] && continue
+          echo "==> record: $zone $name $type $value (ttl=$ttl)"
+
+          # Strip trailing dot from value where Technitium expects bare hostname
+          case "$type" in
+            CNAME|NS|PTR)
+              value=''${value%.}
+              ;;
+          esac
+
+          # The Technitium API uses different fields per type
+          case "$type" in
+            A)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=A" \
+                --data-urlencode "ipAddress=$value" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            AAAA)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=AAAA" \
+                --data-urlencode "ipAddress=$value" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            CNAME)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=CNAME" \
+                --data-urlencode "cname=$value" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            NS)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=NS" \
+                --data-urlencode "nameServer=$value" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            MX)
+              # value format: "PRIO HOST"
+              MX_PRIO=$(echo "$value" | awk '{print $1}')
+              MX_HOST=$(echo "$value" | awk '{print $2}'); MX_HOST=''${MX_HOST%.}
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=MX" \
+                --data-urlencode "preference=$MX_PRIO" \
+                --data-urlencode "exchange=$MX_HOST" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            TXT)
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=TXT" \
+                --data-urlencode "text=$value" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            CAA)
+              # value: "FLAGS TAG \"VAL\""
+              CAA_FLAGS=$(echo "$value" | awk '{print $1}')
+              CAA_TAG=$(echo "$value" | awk '{print $2}')
+              CAA_VAL=$(echo "$value" | awk '{for(i=3;i<=NF;i++) printf "%s ",$i; print ""}' | sed 's/^"//;s/"$//;s/^ //;s/ $//')
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=CAA" \
+                --data-urlencode "flags=$CAA_FLAGS" \
+                --data-urlencode "tag=$CAA_TAG" \
+                --data-urlencode "value=$CAA_VAL" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
+            *)
+              echo "  WARN: unsupported record type $type for $name in $zone" >&2
               ;;
           esac
         done
