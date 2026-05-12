@@ -556,16 +556,14 @@ in {
           --data-urlencode "qpmLimitIPv4PrefixLength=24" \
           --data-urlencode "qpmLimitIPv6PrefixLength=56"
 
-        # ---------- Per-zone reconciliation (skipped on secondary) ----------
-        # In cluster mode, only the PRIMARY owns zone state — secondaries
-        # receive zones via the cluster catalog. Running create/options
-        # on a secondary would conflict with the cluster's view.
-        if [ "$CLUSTER_ROLE" = "secondary" ]; then
-          echo "==> secondary: skipping per-zone reconciliation (cluster handles)"
-          api user/logout > /dev/null || true
-          exit 0
-        fi
-
+        # ---------- Per-zone reconciliation ----------
+        # In the federation, BOTH cluster roles run per-zone reconcile:
+        # cluster catalog DOES NOT manage our zones (NS records would
+        # auto-rewrite to cluster node names, breaking the public NS
+        # pair {ns.ii.coop, ns.developing.coop}). So zones stay as
+        # independent Primary copies on each anchor; both anchors
+        # converge from the same federation-zones.nix declaration.
+        # Cluster handles admin/auth/cert/DNSSEC-key sync separately.
         echo "$ZONES" | while IFS= read -r zone; do
           [ -z "$zone" ] && continue
           echo "==> reconciling zone: $zone"
