@@ -772,6 +772,22 @@ in {
                 --data-urlencode "value=$CAA_VAL" \
                 --data-urlencode "ttl=$ttl" || true
               ;;
+            SRV)
+              # value: "PRIORITY WEIGHT PORT TARGET"
+              SRV_PRIO=$(echo "$value" | awk '{print $1}')
+              SRV_WEIGHT=$(echo "$value" | awk '{print $2}')
+              SRV_PORT=$(echo "$value" | awk '{print $3}')
+              SRV_TARGET=$(echo "$value" | awk '{print $4}'); SRV_TARGET=''${SRV_TARGET%.}
+              api zones/records/add \
+                --data-urlencode "zone=$zone" \
+                --data-urlencode "domain=$name" \
+                --data-urlencode "type=SRV" \
+                --data-urlencode "priority=$SRV_PRIO" \
+                --data-urlencode "weight=$SRV_WEIGHT" \
+                --data-urlencode "port=$SRV_PORT" \
+                --data-urlencode "target=$SRV_TARGET" \
+                --data-urlencode "ttl=$ttl" || true
+              ;;
             *)
               echo "  WARN: unsupported record type $type for $name in $zone" >&2
               ;;
