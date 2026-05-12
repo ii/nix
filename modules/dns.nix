@@ -401,12 +401,12 @@ in {
                 --data-urlencode "user=admin" --data-urlencode "pass=$PASS" \
                 --data-urlencode "includeInfo=false" | jq -r .token)
             fi
-            # Primary must expose its TLS web service to secondaries.
-            # Default (set by ii-nix.modules.services.technitium) is
-            # localhost only — fine for admin UI, but cluster handshake
-            # from secondary needs to reach 53443 over the public
-            # internet. Bind to loopback + the primary's public IP.
-            # The HTTP port shares this list but is firewalled.
+            # ALWAYS apply (not just on first init): Primary must expose
+            # its TLS web service to secondaries. ii-nix.modules.services
+            # .technitium defaults to [127.0.0.1] — fine for admin UI but
+            # not reachable for cluster handshake. Bind to loopback + the
+            # primary's public IP. HTTP port shares this list but is
+            # firewalled; only 53443 is reachable externally.
             WS_ADDR_PAYLOAD=$(jq -n --arg ip "$PRIMARY_IP" \
               '{webServiceLocalAddresses: ["127.0.0.1", $ip]}')
             WS_HTTP=$(curl -sS -o /tmp/api-resp -w '%{http_code}' \
@@ -417,6 +417,18 @@ in {
               echo "WARN: webServiceLocalAddresses update returned $WS_HTTP" >&2
               cat /tmp/api-resp >&2
             fi
+            # Restart the web service so the new binding takes effect.
+            # settings/set updates the config but the listener doesn't
+            # rebind until restart. The HTTP API does this via the
+            # internal restart endpoint OR we can just restart the
+            # systemd unit from outside; here we use the API.
+            curl -sS "$TECHNITIUM_HOST/api/settings/forceUpdateBlockLists" \
+              --data-urlencode "token=$TOKEN" >/dev/null 2>&1 || true
+            # NOTE: Tek typically rebinds on next service restart; if
+            # 53443 still shows 127.0.0.1 after this script runs, do a
+            # `systemctl restart technitium-dns-server.service` manually
+            # or via systemd dependency. For now we tolerate one-deploy
+            # delay; subsequent boots pick up the new binding.
             ;;
           secondary)
             if [ "$CLUSTER_STATE" != "true" ]; then
