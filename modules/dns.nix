@@ -262,6 +262,18 @@ in {
         here to join. Unused for clusterRole = "primary".
       '';
     };
+
+    clusterPrimaryIp = mkOption {
+      type = types.str;
+      default = "";
+      example = "163.192.206.22";
+      description = ''
+        For secondaries: explicit IP for the primary node. Tek 14.3
+        otherwise tries to DNS-resolve the host part of clusterPrimaryUrl
+        (even when it's an IP literal) and fails before it ever
+        connects to the primary. Pass this separately to bypass that.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -301,6 +313,7 @@ in {
         CLUSTER_ROLE = cfg.clusterRole;
         CLUSTER_DOMAIN = cfg.clusterDomain;
         CLUSTER_PRIMARY_URL = cfg.clusterPrimaryUrl;
+        CLUSTER_PRIMARY_IP = cfg.clusterPrimaryIp;
         # Primary's IPs for cluster/init's primaryNodeIpAddresses (only used
         # when clusterRole = primary; for now the federation has a single
         # primary so we pass just this node's primaryIP).
@@ -395,10 +408,11 @@ in {
                 echo "FATAL: clusterRole=secondary needs clusterPrimaryUrl set" >&2
                 exit 1
               fi
-              echo "==> joining cluster via $CLUSTER_PRIMARY_URL"
+              echo "==> joining cluster via $CLUSTER_PRIMARY_URL (primaryIP=$CLUSTER_PRIMARY_IP)"
               api admin/cluster/initJoin \
                 --data-urlencode "secondaryNodeIpAddresses=$PRIMARY_IP" \
                 --data-urlencode "primaryNodeUrl=$CLUSTER_PRIMARY_URL" \
+                --data-urlencode "primaryNodeIpAddress=$CLUSTER_PRIMARY_IP" \
                 --data-urlencode "primaryNodeUsername=admin" \
                 --data-urlencode "primaryNodePassword=$PASS" \
                 --data-urlencode "ignoreCertificateErrors=true"
