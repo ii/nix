@@ -93,13 +93,19 @@ in {
 
       environment = {
         DNS_SERVER_DOMAIN = cfg.dnsServerDomain;
-        DNS_SERVER_ADMIN_PASSWORD_FILE = toString cfg.adminPasswordFile;
+        # DNS_SERVER_ADMIN_PASSWORD_FILE set in the ExecStart wrapper below —
+        # it must point at $CREDENTIALS_DIRECTORY (a runtime-only systemd var
+        # not expandable here) because DynamicUser=true cannot read the
+        # /run/secrets/ path directly (sops files are root:root 0400).
         # Admin UI bound to loopback only — reachable via SSH port-forward
         DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES = "127.0.0.1";
       };
 
       serviceConfig = iiLib.hardening.managedRuntime // {
-        ExecStart = "${cfg.package}/bin/technitium-dns-server ${cfg.dataDir}";
+        ExecStart = pkgs.writeShellScript "technitium-start" ''
+          export DNS_SERVER_ADMIN_PASSWORD_FILE="$CREDENTIALS_DIRECTORY/admin-password"
+          exec ${cfg.package}/bin/technitium-dns-server ${cfg.dataDir}
+        '';
         Restart = "always";
         RestartSec = "10s";
 
