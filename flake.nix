@@ -21,13 +21,16 @@
     # cluster + cluster-catalog support, which doesn't exist in
     # nixos-24.11's 13.0.2 build). Anchor systems still build against
     # nixos-24.11 for everything else; the overlay below substitutes
-    # just the technitium-dns-server package out of nixpkgs-master.
+    # just the technitium-dns-server package out of unstable.
     # Why a separate pin: 14.3.0 needs .NET 9; 24.11 packages 13.0.2
     # against .NET 8 with a regenerated nuget-deps.json. Pulling the
     # whole derivation (including the nuget-deps + libmsquic 9.x +
     # .NET 9 runtime closure) from a tree that has them is much
     # easier than back-porting.
-    nixpkgs-master.url = "github:NixOS/nixpkgs/master";
+    #
+    # nixpkgs-unstable (NOT master) so cache.nixos.org has all the
+    # closure built — master HEAD often isn't fully cached yet.
+    nixpkgs-master.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
