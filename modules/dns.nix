@@ -223,6 +223,45 @@ in {
         services.technitium).
       '';
     };
+
+    # ===== Cluster options (Technitium 14+ feature) =====
+    # Director directive 2026-05-12: pivot from AXFR-peer to Technitium
+    # native clustering. One primary + N secondaries, internal sync via
+    # TLS. Federation zones live in a cluster catalog managed by the
+    # primary; secondaries get them automatically.
+    clusterRole = mkOption {
+      type = types.enum [ "off" "primary" "secondary" ];
+      default = "off";
+      description = ''
+        Role for Technitium native clustering (14+).
+          - off: classic AXFR-peer-TSIG sync (legacy).
+          - primary: this node owns the cluster catalog; zones declared
+            in this module live here and propagate to secondaries.
+          - secondary: this node joins the primary; zones are inherited
+            from the cluster catalog. zoneRecords on this node is ignored.
+      '';
+    };
+
+    clusterDomain = mkOption {
+      type = types.str;
+      default = "ii-federation";
+      description = ''
+        Cluster identity / name. Same value on all member nodes. Used
+        in cluster-internal NOTIFY and zone naming for the catalog.
+      '';
+    };
+
+    clusterPrimaryUrl = mkOption {
+      type = types.str;
+      default = "";
+      example = "https://163.192.206.22:53443";
+      description = ''
+        For secondaries: HTTPS URL of the primary's admin web service.
+        After cluster/init on the primary, TLS auto-enables with a
+        self-signed cert on port 53443 by default. Secondaries connect
+        here to join. Unused for clusterRole = "primary".
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -258,6 +297,14 @@ in {
         RECURSION_MODE = cfg.recursion;
         RECURSION_ALLOWED_NETWORKS = lib.concatStringsSep "," cfg.recursionAllowedNetworks;
         RECURSION_QPM = toString cfg.recursionQpmLimit;
+        # Cluster (14+ native sync). CLUSTER_ROLE="off" → fall back to AXFR-peer.
+        CLUSTER_ROLE = cfg.clusterRole;
+        CLUSTER_DOMAIN = cfg.clusterDomain;
+        CLUSTER_PRIMARY_URL = cfg.clusterPrimaryUrl;
+        # Primary's IPs for cluster/init's primaryNodeIpAddresses (only used
+        # when clusterRole = primary; for now the federation has a single
+        # primary so we pass just this node's primaryIP).
+        CLUSTER_PRIMARY_IPS = cfg.primaryIP;
         # zone records serialized as TSV (tab-separated): zone<TAB>name<TAB>type<TAB>value<TAB>ttl
         ZONE_RECORDS_TSV = lib.concatStringsSep "\n"
           (lib.concatMap (zone:
@@ -303,6 +350,69 @@ in {
           cat /tmp/api-resp >&2
           return 1
         }
+
+        # ---------- Cluster bootstrap (Technitium 14+) ----------
+        # Three roles handled here:
+        #   off: skip cluster setup, run classic AXFR-peer reconcile below.
+        #   primary: cluster/init if not yet initialized; afterwards run the
+        #     full zone reconcile so this node owns the catalog content.
+        #   secondary: cluster/initJoin pointing at primary; the cluster
+        #     propagates zones automatically, so we EXIT after the join
+        #     without running per-zone reconciliation here.
+        #
+        # cluster/init auto-enables TLS with a self-signed cert on
+        # webServiceTlsPort=53443. The secondary connects there with
+        # ignoreCertificateErrors=true for the self-signed bootstrap.
+        # Future improvement: rotate to ACME wildcard once gate-3 certs land.
+
+        CLUSTER_STATE=$(curl -fsS "$TECHNITIUM_HOST/api/admin/cluster/state" \
+          --data-urlencode "token=$TOKEN" 2>/dev/null \
+          | jq -r '.response.clusterInitialized // false' 2>/dev/null || echo "false")
+        echo "==> cluster role=$CLUSTER_ROLE initialized=$CLUSTER_STATE"
+
+        case "$CLUSTER_ROLE" in
+          primary)
+            if [ "$CLUSTER_STATE" != "true" ]; then
+              echo "==> initializing cluster $CLUSTER_DOMAIN as primary"
+              api admin/cluster/init \
+                --data-urlencode "clusterDomain=$CLUSTER_DOMAIN" \
+                --data-urlencode "primaryNodeIpAddresses=$CLUSTER_PRIMARY_IPS"
+              # cluster/init enables TLS + may restart web service —
+              # wait briefly for it to come back on the HTTP port too.
+              for i in 1 2 3 4 5; do
+                if curl -fsS "$TECHNITIUM_HOST/" >/dev/null 2>&1; then break; fi
+                sleep 2
+              done
+              # Re-authenticate after possible restart
+              TOKEN=$(curl -fsS "$TECHNITIUM_HOST/api/user/login" \
+                --data-urlencode "user=admin" --data-urlencode "pass=$PASS" \
+                --data-urlencode "includeInfo=false" | jq -r .token)
+            fi
+            ;;
+          secondary)
+            if [ "$CLUSTER_STATE" != "true" ]; then
+              if [ -z "$CLUSTER_PRIMARY_URL" ]; then
+                echo "FATAL: clusterRole=secondary needs clusterPrimaryUrl set" >&2
+                exit 1
+              fi
+              echo "==> joining cluster via $CLUSTER_PRIMARY_URL"
+              api admin/cluster/initJoin \
+                --data-urlencode "secondaryNodeIpAddresses=$PRIMARY_IP" \
+                --data-urlencode "primaryNodeUrl=$CLUSTER_PRIMARY_URL" \
+                --data-urlencode "primaryNodeUsername=admin" \
+                --data-urlencode "primaryNodePassword=$PASS" \
+                --data-urlencode "ignoreCertificateErrors=true"
+              echo "==> cluster joined; primary now owns zone state"
+            fi
+            # Secondaries do NOT run zone reconciliation — primary
+            # propagates via cluster catalog. Install TSIG key for
+            # external DDNS updates (still useful per-node), then exit.
+            : # fall through to TSIG install + settings/set, then return
+            ;;
+          off)
+            : # classic AXFR-peer mode — fall through to existing logic
+            ;;
+        esac
 
         # ---------- Install AXFR TSIG key (federation-shared) ----------
         # API drift between Tek 13.x and 14.x:
@@ -360,7 +470,16 @@ in {
           --data-urlencode "qpmLimitIPv4PrefixLength=24" \
           --data-urlencode "qpmLimitIPv6PrefixLength=56"
 
-        # ---------- Per-zone reconciliation ----------
+        # ---------- Per-zone reconciliation (skipped on secondary) ----------
+        # In cluster mode, only the PRIMARY owns zone state — secondaries
+        # receive zones via the cluster catalog. Running create/options
+        # on a secondary would conflict with the cluster's view.
+        if [ "$CLUSTER_ROLE" = "secondary" ]; then
+          echo "==> secondary: skipping per-zone reconciliation (cluster handles)"
+          api user/logout > /dev/null || true
+          exit 0
+        fi
+
         echo "$ZONES" | while IFS= read -r zone; do
           [ -z "$zone" ] && continue
           echo "==> reconciling zone: $zone"
