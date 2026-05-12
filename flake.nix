@@ -17,6 +17,17 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    # Newer pin used ONLY to pull technitium-dns-server 14.3.0 (with
+    # cluster + cluster-catalog support, which doesn't exist in
+    # nixos-24.11's 13.0.2 build). Anchor systems still build against
+    # nixos-24.11 for everything else; the overlay below substitutes
+    # just the technitium-dns-server package out of nixpkgs-master.
+    # Why a separate pin: 14.3.0 needs .NET 9; 24.11 packages 13.0.2
+    # against .NET 8 with a regenerated nuget-deps.json. Pulling the
+    # whole derivation (including the nuget-deps + libmsquic 9.x +
+    # .NET 9 runtime closure) from a tree that has them is much
+    # easier than back-porting.
+    nixpkgs-master.url = "github:NixOS/nixpkgs/master";
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -30,7 +41,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, disko, sops-nix }:
+  outputs = { self, nixpkgs, nixpkgs-master, disko, sops-nix }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -85,6 +96,19 @@
         maddy = ./modules/services/maddy.nix;
         acme-dns01 = ./modules/services/acme-dns01.nix;
 
+        # Overlay: replace nixos-24.11's technitium-dns-server (13.0.2,
+        # no clustering) with nixpkgs-master's (14.3.0, has clustering).
+        # Pulled in by the anchor bundle below; consumers that don't
+        # need clustering can skip it and keep 13.0.2.
+        technitium-14 = { ... }: {
+          nixpkgs.overlays = [
+            (final: prev: {
+              technitium-dns-server =
+                nixpkgs-master.legacyPackages.${prev.system}.technitium-dns-server;
+            })
+          ];
+        };
+
         # Convenience: import everything legacy + federation
         default = { imports = [
           ./modules/domain-users.nix
@@ -105,6 +129,11 @@
           ./modules/services/technitium.nix
           ./modules/services/maddy.nix
           ./modules/services/acme-dns01.nix
+          # Pull technitium-dns-server 14.3.0 from nixpkgs-master via
+          # overlay. 14.x is the first version with cluster + cluster
+          # catalog (required for the federation sync model in
+          # dns.nix); nixos-24.11's 13.0.2 doesn't have either.
+          self.nixosModules.technitium-14
         ]; };
       };
 
