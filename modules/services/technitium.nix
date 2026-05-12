@@ -118,6 +118,19 @@ in {
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
 
+        # Override managedRuntime's RestrictAddressFamilies — Technitium's
+        # DhcpServer ctor runs unconditionally at startup (even when no
+        # scopes are configured) and calls LinuxNetworkInterface
+        # .GetLinuxNetworkInterfaces() which opens an AF_NETLINK socket
+        # to enumerate interfaces. Without this, the service crashes
+        # before ever loading config with "Address family not supported"
+        # (errno 97), and on subsequent restarts hits a misleading
+        # ArgumentNullException in CreateForwarderZoneToDisableDnssecForNTP
+        # because the first crash leaves a partial empty auth.config.
+        # AF_PACKET added defensively for raw-socket interface queries on
+        # some kernels.
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
+
         # Admin password file readable by the dynamic user
         LoadCredential = [ "admin-password:${toString cfg.adminPasswordFile}" ];
       };
