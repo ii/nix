@@ -305,10 +305,40 @@ in {
         }
 
         # ---------- Install AXFR TSIG key (federation-shared) ----------
-        api settings/tsig/set \
-          --data-urlencode "keyName=$TSIG_KEY_NAME" \
-          --data-urlencode "sharedSecret=$TSIG_SECRET" \
-          --data-urlencode "algorithm=hmac-sha256"
+        # API drift between Tek 13.x and 14.x:
+        #   13.x: POST /api/settings/tsig/set with form params keyName/
+        #         sharedSecret/algorithm (returned 404 actually — script
+        #         masked it with `|| true` elsewhere; key persisted in
+        #         disk config across boots so it still worked).
+        #   14.x: TSIG keys are part of the main settings/set payload as
+        #         an OBJECT ARRAY. Form-param array passing fails with
+        #         "Offset and length were out of bounds" — has to be a
+        #         JSON body. Field is `algorithmName` (not `algorithm`).
+        #
+        # We do the idempotent thing: GET current settings → keep all
+        # tsigKeys whose keyName isn't ours → append our key → POST
+        # settings/set with JSON body. Preserves any other TSIG keys an
+        # operator has added via the UI.
+        TSIG_KEY_ENTRY=$(jq -n \
+          --arg name "$TSIG_KEY_NAME" \
+          --arg secret "$TSIG_SECRET" \
+          '{keyName: $name, sharedSecret: $secret, algorithmName: "hmac-sha256"}')
+
+        MERGED_TSIG=$(curl -fsS "$TECHNITIUM_HOST/api/settings/get?token=$TOKEN" \
+          | jq --arg name "$TSIG_KEY_NAME" --argjson new "$TSIG_KEY_ENTRY" \
+              '(.response.tsigKeys // []) | map(select(.keyName != $name)) + [$new]')
+
+        TSIG_PAYLOAD=$(jq -n --argjson keys "$MERGED_TSIG" '{tsigKeys: $keys}')
+
+        TSIG_HTTP=$(curl -sS -o /tmp/api-resp -w '%{http_code}' \
+          -X POST "$TECHNITIUM_HOST/api/settings/set?token=$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "$TSIG_PAYLOAD")
+        if [ "$TSIG_HTTP" != "200" ]; then
+          echo "FATAL: TSIG settings/set returned HTTP $TSIG_HTTP" >&2
+          cat /tmp/api-resp >&2
+          exit 1
+        fi
 
         # ---------- Server-wide settings: TCP-bindable endpoint + recursion ----------
         # 0.0.0.0:53 only — not [::]:53. Reason: systemd-resolved (if present)
