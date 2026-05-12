@@ -329,14 +329,42 @@ in {
             --data-urlencode "zone=$zone" \
             --data-urlencode "type=Primary" || true
 
-          # Step b: SOA via zone options
+          # Step b1: zone options (notify, AXFR ACL via TSIG)
+          # Note: primaryNameServer at this endpoint applies only to
+          # Secondary/Stub zones, not Primary — for Primary zones the
+          # SOA MNAME is a record we update in step b2.
           api zones/options/set \
             --data-urlencode "zone=$zone" \
-            --data-urlencode "primaryNameServer=$PRIMARY_HOSTNAME" \
-            --data-urlencode "responsiblePerson=hostmaster.$zone" \
             --data-urlencode "notify=ZoneNameServers" \
             --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
             --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME"
+
+          # Step b2: SOA MNAME (primary nameserver) — only updates if
+          # different from desired. Serial must be >= current; we
+          # read-then-update with current_serial (Technitium auto-
+          # increments on subsequent record changes).
+          CURRENT_SOA=$(curl -fsS "$TECHNITIUM_HOST/api/zones/records/get" \
+            --data-urlencode "token=$TOKEN" \
+            --data-urlencode "domain=$zone" \
+            --data-urlencode "zone=$zone" \
+            --data-urlencode "listZone=false" \
+            | jq -r '.response.records[] | select(.type=="SOA") | "\(.rData.primaryNameServer)\t\(.rData.serial)"')
+          CUR_MNAME=$(echo "$CURRENT_SOA" | cut -f1)
+          CUR_SERIAL=$(echo "$CURRENT_SOA" | cut -f2)
+          if [ "$CUR_MNAME" != "$PRIMARY_HOSTNAME" ] && [ -n "$CUR_SERIAL" ]; then
+            echo "  - SOA MNAME drift: $CUR_MNAME -> $PRIMARY_HOSTNAME (serial $CUR_SERIAL)"
+            api zones/records/update \
+              --data-urlencode "zone=$zone" \
+              --data-urlencode "domain=$zone" \
+              --data-urlencode "type=SOA" \
+              --data-urlencode "primaryNameServer=$PRIMARY_HOSTNAME" \
+              --data-urlencode "responsiblePerson=hostadmin.$zone" \
+              --data-urlencode "serial=$CUR_SERIAL" \
+              --data-urlencode "refresh=900" \
+              --data-urlencode "retry=300" \
+              --data-urlencode "expire=604800" \
+              --data-urlencode "minimum=900" || true
+          fi
 
           # Compute the authoritative set of NS hostnames for this zone
           DESIRED_NS=$(printf '%s\n' "$PRIMARY_HOSTNAME")
