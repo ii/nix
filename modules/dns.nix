@@ -361,17 +361,49 @@ in {
         api() {
           local endpoint=$1; shift
           # 409 (conflict / already exists) treated as success — idempotent
+          # AND check response body for {"status":"error"} — Tek 14
+          # returns HTTP 200 for many runtime failures with the error
+          # only in the body. Without body-checking we falsely report
+          # success.
           local http_code
           http_code=$(curl -sS -o /tmp/api-resp -w '%{http_code}' \
             "$TECHNITIUM_HOST/api/$endpoint" \
             --data-urlencode "token=$TOKEN" "$@")
-          if [ "$http_code" = "200" ] || [ "$http_code" = "409" ]; then
-            return 0
+          if [ "$http_code" != "200" ] && [ "$http_code" != "409" ]; then
+            echo "API call failed: $endpoint (HTTP $http_code)" >&2
+            cat /tmp/api-resp >&2
+            return 1
           fi
-          echo "API call failed: $endpoint (HTTP $http_code)" >&2
-          cat /tmp/api-resp >&2
-          return 1
+          local status
+          status=$(jq -r '.status // "ok"' /tmp/api-resp 2>/dev/null)
+          if [ "$status" = "error" ]; then
+            local msg
+            msg=$(jq -r '.errorMessage // "unknown error"' /tmp/api-resp 2>/dev/null)
+            echo "API call body-error: $endpoint — $msg" >&2
+            return 1
+          fi
+          return 0
         }
+
+        # ---------- Force dnsServerDomain via API (env var only fires on first boot) ----------
+        # Technitium reads DNS_SERVER_DOMAIN env var only when dns.config
+        # doesn't exist (first start). On subsequent starts, it loads the
+        # value from disk. Updating the Nix module's
+        # services.technitium.dnsServerDomain only takes effect on a
+        # FRESH state dir — which we don't get post-cluster-init.
+        # Explicitly push the desired value via settings/set on every
+        # reconcile. The DESIRED_DNS_SERVER_DOMAIN is the system hostname
+        # (e.g., 'anchor-iad' / 'anchor-ord') — unique per node, so
+        # cluster ops compute unique identities and don't collide.
+        DESIRED_DNS_SERVER_DOMAIN=$(hostname)
+        CURRENT_DNS_SERVER_DOMAIN=$(curl -fsS "$TECHNITIUM_HOST/api/settings/get?token=$TOKEN" \
+          | jq -r '.response.dnsServerDomain // ""')
+        if [ "$CURRENT_DNS_SERVER_DOMAIN" != "$DESIRED_DNS_SERVER_DOMAIN" ] && \
+           [[ "$CURRENT_DNS_SERVER_DOMAIN" != *.$CLUSTER_DOMAIN ]]; then
+          # Skip rename if already cluster-mangled (e.g. anchor-iad.ii-federation).
+          echo "==> rename dnsServerDomain: $CURRENT_DNS_SERVER_DOMAIN -> $DESIRED_DNS_SERVER_DOMAIN"
+          api settings/set --data-urlencode "dnsServerDomain=$DESIRED_DNS_SERVER_DOMAIN" || true
+        fi
 
         # ---------- Cluster bootstrap (Technitium 14+) ----------
         # Three roles handled here:
