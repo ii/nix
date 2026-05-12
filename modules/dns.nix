@@ -170,7 +170,7 @@ in {
     };
 
     recursion = mkOption {
-      type = types.enum [ "Allow" "Deny" "AllowOnlyForPrivateNetworks" "UseSpecifiedNetworks" ];
+      type = types.enum [ "Allow" "Deny" "AllowOnlyForPrivateNetworks" "UseSpecifiedNetworkACL" ];
       default = "Deny";
       description = ''
         Whether the DNS server should recursively resolve queries it
@@ -178,9 +178,9 @@ in {
           - Deny: never recurse (authoritative-only).
           - Allow: recurse for everyone (open public resolver).
           - AllowOnlyForPrivateNetworks: RFC1918 + loopback only.
-          - UseSpecifiedNetworks: recurse only for CIDRs listed in
+          - UseSpecifiedNetworkACL: recurse only for CIDRs listed in
             recursionAllowedNetworks. Anything else → REFUSED.
-        Pick UseSpecifiedNetworks for a federation-blessed ACL that
+        Pick UseSpecifiedNetworkACL for a federation-blessed ACL that
         includes CGNAT (100.64/10) or other non-RFC1918 trusted ranges
         beyond what AllowOnlyForPrivateNetworks covers.
       '';
@@ -191,8 +191,9 @@ in {
       default = [ ];
       example = [ "127.0.0.0/8" "10.0.0.0/8" "100.64.0.0/10" "172.16.0.0/12" "192.168.0.0/16" ];
       description = ''
-        CIDR list for recursion=UseSpecifiedNetworks. Ignored for other
-        recursion modes.
+        CIDR list for recursion=UseSpecifiedNetworkACL (passed to
+        Technitium's recursionNetworkACL setting as a comma-joined
+        list). Ignored for other recursion modes.
       '';
     };
 
@@ -322,8 +323,7 @@ in {
         api settings/set \
           --data-urlencode "dnsServerLocalEndPoints=0.0.0.0:53" \
           --data-urlencode "recursion=$RECURSION_MODE" \
-          --data-urlencode "recursionDeniedNetworks=" \
-          --data-urlencode "recursionAllowedNetworks=$RECURSION_ALLOWED_NETWORKS" \
+          --data-urlencode "recursionNetworkACL=$RECURSION_ALLOWED_NETWORKS" \
           --data-urlencode "qpmLimitRequests=$RECURSION_QPM" \
           --data-urlencode "qpmLimitErrors=10" \
           --data-urlencode "qpmLimitSampleMinutes=5" \
