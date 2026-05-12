@@ -327,6 +327,9 @@ in {
         # when clusterRole = primary; for now the federation has a single
         # primary so we pass just this node's primaryIP).
         CLUSTER_PRIMARY_IPS = cfg.primaryIP;
+        # Pre-evaluated at Nix time; avoids needing `hostname` (from
+        # inetutils) in the service PATH.
+        NODE_HOSTNAME = config.networking.hostName;
         # zone records serialized as TSV (tab-separated): zone<TAB>name<TAB>type<TAB>value<TAB>ttl
         ZONE_RECORDS_TSV = lib.concatStringsSep "\n"
           (lib.concatMap (zone:
@@ -395,7 +398,7 @@ in {
         # reconcile. The DESIRED_DNS_SERVER_DOMAIN is the system hostname
         # (e.g., 'anchor-iad' / 'anchor-ord') — unique per node, so
         # cluster ops compute unique identities and don't collide.
-        DESIRED_DNS_SERVER_DOMAIN=$(hostname)
+        DESIRED_DNS_SERVER_DOMAIN="$NODE_HOSTNAME"
         CURRENT_DNS_SERVER_DOMAIN=$(curl -fsS "$TECHNITIUM_HOST/api/settings/get?token=$TOKEN" \
           | jq -r '.response.dnsServerDomain // ""')
         if [ "$CURRENT_DNS_SERVER_DOMAIN" != "$DESIRED_DNS_SERVER_DOMAIN" ] && \
