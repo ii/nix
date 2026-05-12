@@ -170,13 +170,29 @@ in {
     };
 
     recursion = mkOption {
-      type = types.enum [ "Allow" "Deny" "AllowOnlyForPrivateNetworks" ];
+      type = types.enum [ "Allow" "Deny" "AllowOnlyForPrivateNetworks" "UseSpecifiedNetworks" ];
       default = "Deny";
       description = ''
         Whether the DNS server should recursively resolve queries it
-        is not authoritative for. "Allow" makes this a public resolver;
-        combine with the rate-limit options or risk being a DNS-amp
-        attack relay.
+        is not authoritative for.
+          - Deny: never recurse (authoritative-only).
+          - Allow: recurse for everyone (open public resolver).
+          - AllowOnlyForPrivateNetworks: RFC1918 + loopback only.
+          - UseSpecifiedNetworks: recurse only for CIDRs listed in
+            recursionAllowedNetworks. Anything else → REFUSED.
+        Pick UseSpecifiedNetworks for a federation-blessed ACL that
+        includes CGNAT (100.64/10) or other non-RFC1918 trusted ranges
+        beyond what AllowOnlyForPrivateNetworks covers.
+      '';
+    };
+
+    recursionAllowedNetworks = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "127.0.0.0/8" "10.0.0.0/8" "100.64.0.0/10" "172.16.0.0/12" "192.168.0.0/16" ];
+      description = ''
+        CIDR list for recursion=UseSpecifiedNetworks. Ignored for other
+        recursion modes.
       '';
     };
 
@@ -184,7 +200,7 @@ in {
       type = types.int;
       default = 100;
       description = ''
-        Per-client queries-per-minute limit when recursion=Allow.
+        Per-client queries-per-minute limit when recursion is enabled.
         Applies to clients matched by qpmLimitIPv4PrefixLength /
         qpmLimitIPv6PrefixLength (defaults: /24 and /56).
       '';
@@ -239,6 +255,7 @@ in {
         TECHNITIUM_HOST = "http://127.0.0.1:5380";
         TSIG_KEY_NAME = "ii-federation-axfr";
         RECURSION_MODE = cfg.recursion;
+        RECURSION_ALLOWED_NETWORKS = lib.concatStringsSep "," cfg.recursionAllowedNetworks;
         RECURSION_QPM = toString cfg.recursionQpmLimit;
         # zone records serialized as TSV (tab-separated): zone<TAB>name<TAB>type<TAB>value<TAB>ttl
         ZONE_RECORDS_TSV = lib.concatStringsSep "\n"
@@ -306,7 +323,7 @@ in {
           --data-urlencode "dnsServerLocalEndPoints=0.0.0.0:53" \
           --data-urlencode "recursion=$RECURSION_MODE" \
           --data-urlencode "recursionDeniedNetworks=" \
-          --data-urlencode "recursionAllowedNetworks=" \
+          --data-urlencode "recursionAllowedNetworks=$RECURSION_ALLOWED_NETWORKS" \
           --data-urlencode "qpmLimitRequests=$RECURSION_QPM" \
           --data-urlencode "qpmLimitErrors=10" \
           --data-urlencode "qpmLimitSampleMinutes=5" \
