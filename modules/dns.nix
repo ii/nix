@@ -490,10 +490,57 @@ in {
                 --data-urlencode "ignoreCertificateErrors=true"
               echo "==> cluster joined; primary now owns zone state"
             fi
-            # Secondaries do NOT run zone reconciliation — primary
-            # propagates via cluster catalog. Install TSIG key for
-            # external DDNS updates (still useful per-node), then exit.
-            : # fall through to TSIG install + settings/set, then return
+
+            # ===== One-time migration: local Primary -> cluster-managed Secondary =====
+            # Earlier design (architect 2026-05-12) chose independent Primary on
+            # each anchor with both reconciling from the same federation-zones.nix.
+            # That works for static records but DDNS UPDATEs (ACME challenges,
+            # cert-manager, etc) only land on the anchor lego/cert-manager talks
+            # to. The other anchor never sees them, so half of LE's MPIC
+            # validations fail.
+            #
+            # Tek 14.3 catalog DOES NOT auto-rewrite NS records on member zones
+            # (verified ClusterManager.cs: NS rewriting only touches the cluster's
+            # internal bookkeeping zone, not member zones). Catalog members on
+            # secondaries get standard Secondary semantics: AXFR/IXFR from
+            # primary, serve identical data. Solves DDNS replication cleanly.
+            #
+            # For each declared federation zone: if it exists locally as a
+            # Primary with no catalog membership, delete it. Cluster catalog
+            # (which the primary marks as the zone's owner) propagates via
+            # IXFR to the catalog zone on this node, which then auto-creates
+            # the zone as Secondary and starts AXFR pull from primary.
+            # Idempotent: re-running finds either Secondary (skip) or absent
+            # (catalog will eventually add it).
+            echo "==> secondary migration: checking for stale local Primary copies"
+            ALL_ZONES_JSON=$(curl -fsS "$TECHNITIUM_HOST/api/zones/list?token=$TOKEN")
+            echo "$ZONES" | while IFS= read -r zone; do
+              [ -z "$zone" ] && continue
+              ZTYPE=$(echo "$ALL_ZONES_JSON" | jq -r --arg z "$zone" '.response.zones[] | select(.name == $z) | .type // "none"')
+              ZCATALOG=$(echo "$ALL_ZONES_JSON" | jq -r --arg z "$zone" '.response.zones[] | select(.name == $z) | .catalog // ""')
+              if [ "$ZTYPE" = "Primary" ] && [ -z "$ZCATALOG" ]; then
+                echo "  - migrating $zone: deleting local Primary (cluster catalog will recreate as Secondary)"
+                api zones/delete --data-urlencode "zone=$zone" || true
+              elif [ "$ZTYPE" = "Secondary" ] && [ -n "$ZCATALOG" ]; then
+                echo "  - $zone: already cluster-managed Secondary (catalog=$ZCATALOG), no migration needed"
+              elif [ "$ZTYPE" = "none" ]; then
+                echo "  - $zone: not present locally (catalog will add when ready)"
+              else
+                echo "  - $zone: type=$ZTYPE catalog=$ZCATALOG (unexpected state, leaving alone)"
+              fi
+            done
+
+            # Secondary nodes skip TSIG install, settings/set (recursion etc),
+            # and per-zone records reconcile — ALL of those forward to the
+            # primary via cluster TLS, which currently fails because the
+            # primary serves a self-signed bootstrap cert (LE cert issuance
+            # is what we're trying to enable through this very migration).
+            # Once ACME issues + tek-cert-install lands on primary, iad's
+            # cluster TLS validates and a future deploy can run the full
+            # reconcile on this node too (idempotent / no-op).
+            echo "==> secondary setup complete; cluster propagates zone data"
+            api user/logout >/dev/null 2>&1 || true
+            exit 0
             ;;
           off)
             : # classic AXFR-peer mode — fall through to existing logic
@@ -557,13 +604,20 @@ in {
           --data-urlencode "qpmLimitIPv6PrefixLength=56"
 
         # ---------- Per-zone reconciliation ----------
-        # In the federation, BOTH cluster roles run per-zone reconcile:
-        # cluster catalog DOES NOT manage our zones (NS records would
-        # auto-rewrite to cluster node names, breaking the public NS
-        # pair {ns.ii.coop, ns.developing.coop}). So zones stay as
-        # independent Primary copies on each anchor; both anchors
-        # converge from the same federation-zones.nix declaration.
-        # Cluster handles admin/auth/cert/DNSSEC-key sync separately.
+        # PRIMARY role: own the canonical zone data here. Each zone gets
+        # assigned to cluster-catalog.$CLUSTER_DOMAIN so it propagates to
+        # cluster secondaries (which auto-create them as Secondary copies
+        # and AXFR pull). The earlier concern that cluster catalog would
+        # rewrite NS records to cluster node names is incorrect for
+        # Tek 14.3: ClusterManager NS rewriting only affects the cluster's
+        # OWN bookkeeping zone (ii-federation), not member zones. Member
+        # zones serve whatever NS RRset the primary publishes (in our
+        # case: {ns.ii.coop, ns.developing.coop}, kept verbatim through
+        # AXFR/IXFR to secondaries).
+        #
+        # OFF role: classic AXFR-peer mode (legacy). No catalog assignment.
+        #
+        # SECONDARY role: exited above after migration; this loop doesn't run.
         echo "$ZONES" | while IFS= read -r zone; do
           [ -z "$zone" ] && continue
           echo "==> reconciling zone: $zone"
@@ -613,13 +667,23 @@ in {
           # AllowZoneNameServersAndUseSpecifiedNetworkACL.
           UPDATE_TYPES="TXT,A,AAAA,CNAME,SRV,PTR,CAA"
           UPDATE_POLICY="$TSIG_KEY_NAME|$zone|$UPDATE_TYPES|$TSIG_KEY_NAME|*.$zone|$UPDATE_TYPES"
+
+          # On cluster primary, also assign the zone to the cluster catalog
+          # so secondaries auto-mirror it. On clusterRole=off, catalog stays
+          # unset (legacy independent-Primary).
+          CATALOG_ARGS=()
+          if [ "$CLUSTER_ROLE" = "primary" ]; then
+            CATALOG_ARGS=(--data-urlencode "catalog=cluster-catalog.$CLUSTER_DOMAIN")
+          fi
+
           api zones/options/set \
             --data-urlencode "zone=$zone" \
             --data-urlencode "notify=ZoneNameServers" \
             --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
             --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME" \
             --data-urlencode "update=Allow" \
-            --data-urlencode "updateSecurityPolicies=$UPDATE_POLICY"
+            --data-urlencode "updateSecurityPolicies=$UPDATE_POLICY" \
+            "''${CATALOG_ARGS[@]}"
 
           # Step b2: SOA MNAME (primary nameserver) — only updates if
           # different from desired. Serial must be >= current; we
