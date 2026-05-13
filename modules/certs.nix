@@ -82,7 +82,10 @@ in {
       }
     ];
 
-    # The bare ACME client targets THIS server's Technitium for DNS-01
+    # The bare ACME client targets THIS server's Technitium for DNS-01.
+    # credentialFile points to a path populated by activationScripts below
+    # (NOT at runtime) — EnvironmentFile is loaded by systemd BEFORE
+    # ExecStartPre runs, so a runtime-built creds file would be too late.
     services.acme-dns01 = {
       enable = true;
       email = cfg.email;
@@ -90,11 +93,7 @@ in {
       acmeServer = cfg.acmeServer;
       dnsProvider = "rfc2136";
       certPath = cfg.certPath;
-
-      # Reuses the federation TSIG key — eliminates a duplicate secret.
-      # The credentialFile is built at activation: combines the TSIG key
-      # value with the RFC2136 protocol vars.
-      credentialFile = "/run/credentials/acme-dns01.service/dns01-creds";
+      credentialFile = "/run/acme-dns01/creds";
     };
 
     # ACME must wait for the federation reconciler to finish — that's what
@@ -105,30 +104,147 @@ in {
     systemd.services.acme-dns01 = {
       after = [ "technitium-federation-reconcile.service" ];
       wants = [ "technitium-federation-reconcile.service" ];
+    };
 
-      # Construct the lego env-file at unit start from the TSIG key
-      serviceConfig = {
-        LoadCredential = lib.mkAfter [
-          # Same TSIG key as AXFR
-          "tsig-key:${toString dnsCfg.tsigKeyFile}"
-        ];
-        # Build the env-file expected by lego rfc2136 from the TSIG credential
-        ExecStartPre = pkgs.writeShellScript "build-dns01-creds" ''
-          set -euo pipefail
-          TSIG="$(cat $CREDENTIALS_DIRECTORY/tsig-key)"
-          cat > $CREDENTIALS_DIRECTORY/dns01-creds <<EOF
-          RFC2136_NAMESERVER=127.0.0.1:53
-          RFC2136_TSIG_ALGORITHM=hmac-sha256
-          RFC2136_TSIG_KEY=ii-federation-acme
-          RFC2136_TSIG_SECRET=$TSIG
-          EOF
-          chmod 0400 $CREDENTIALS_DIRECTORY/dns01-creds
-        '';
-      };
+    # Build the lego rfc2136 env-file at NixOS activation, AFTER sops-nix
+    # has decrypted the TSIG. /run is tmpfs so the file vanishes on reboot
+    # and is re-created from secrets on next activation (boot or switch).
+    # TSIG_KEY name must match what dns.nix installs in Technitium:
+    # ii-federation-axfr (same key powers AXFR + DDNS UPDATE; UPDATE
+    # authorization is granted per-zone via updateSecurityPolicies in dns.nix).
+    system.activationScripts.acme-dns01-creds = {
+      deps = [ "setupSecrets" ];
+      text = ''
+        install -d -m 0700 /run/acme-dns01
+        TSIG=$(cat ${toString dnsCfg.tsigKeyFile})
+        umask 077
+        cat > /run/acme-dns01/creds <<EOF
+        RFC2136_NAMESERVER=127.0.0.1:53
+        RFC2136_TSIG_ALGORITHM=hmac-sha256
+        RFC2136_TSIG_KEY=ii-federation-axfr
+        RFC2136_TSIG_SECRET=$TSIG
+        EOF
+        chmod 0400 /run/acme-dns01/creds
+      '';
     };
 
     # Renewal timer should also wait — sequenced dependency chain:
     # technitium-dns-server → technitium-federation-reconcile → acme-dns01
     systemd.timers.acme-dns01.timerConfig.OnUnitActiveSec = lib.mkDefault "1d";
+
+    # ===== Cert handoff into Technitium's web service =====
+    # When lego writes a new cert, bundle it into a PFX, place it where the
+    # technitium-dns-server user can read it, and point Tek's web service
+    # at it via API. Driven by a systemd path unit watching the cert dir,
+    # so it fires on both initial issuance AND renewals (without a Tek
+    # restart on weekly no-op renewal checks).
+    #
+    # Why PFX: Tek's webServiceTlsCertificatePath wants a PKCS12 file. Lego
+    # writes PEM (cert/key/chain separately). We bundle on the fly.
+    # Empty password: file is chmod 0400 + chowned to Tek's user; the PFX
+    # password is a no-op boundary.
+    systemd.services.tek-cert-install = {
+      description = "Install lego-issued cert into Technitium's web service";
+      after = [ "acme-dns01.service" "technitium-dns-server.service" ];
+
+      path = [ pkgs.openssl pkgs.curl pkgs.jq pkgs.coreutils pkgs.findutils ];
+
+      serviceConfig = {
+        Type = "oneshot";
+        LoadCredential = [
+          "admin-pass:${toString dnsCfg.adminPasswordFile}"
+        ];
+      };
+
+      script = ''
+        set -eu
+
+        CERT_DIR=${cfg.certPath}/certificates
+        TEK_DIR=/var/lib/technitium
+        PFX_PATH=$TEK_DIR/lego-cert.pfx
+
+        if [ ! -d "$CERT_DIR" ]; then
+          echo "no certificates directory at $CERT_DIR yet — first issuance hasn't completed"
+          exit 0
+        fi
+
+        # Find the most recent issued cert (lego writes <sanitized-primary>.crt
+        # plus a separate <name>.issuer.crt for the chain; pick the leaf).
+        CERT_FILE=$(find "$CERT_DIR" -maxdepth 1 -name "*.crt" -not -name "*.issuer.crt" \
+          -printf "%T@\t%p\n" | sort -rn | head -1 | cut -f2)
+        if [ -z "$CERT_FILE" ]; then
+          echo "no .crt files in $CERT_DIR — nothing to install"
+          exit 0
+        fi
+        KEY_FILE="''${CERT_FILE%.crt}.key"
+        ISSUER_FILE="''${CERT_FILE%.crt}.issuer.crt"
+
+        if [ ! -f "$KEY_FILE" ]; then
+          echo "cert at $CERT_FILE has no matching key at $KEY_FILE" >&2
+          exit 1
+        fi
+
+        echo "bundling $CERT_FILE + $KEY_FILE -> $PFX_PATH"
+        if [ -f "$ISSUER_FILE" ]; then
+          openssl pkcs12 -export \
+            -out "$PFX_PATH.new" \
+            -inkey "$KEY_FILE" \
+            -in "$CERT_FILE" \
+            -certfile "$ISSUER_FILE" \
+            -passout pass:
+        else
+          openssl pkcs12 -export \
+            -out "$PFX_PATH.new" \
+            -inkey "$KEY_FILE" \
+            -in "$CERT_FILE" \
+            -passout pass:
+        fi
+        chmod 0400 "$PFX_PATH.new"
+        chown technitium-dns-server:technitium-dns-server "$PFX_PATH.new"
+
+        # Skip API call if PFX content hasn't changed (e.g. weekly no-op
+        # renewal check fired the path unit but lego decided not to renew).
+        if [ -f "$PFX_PATH" ] && cmp -s "$PFX_PATH" "$PFX_PATH.new"; then
+          echo "PFX unchanged — no Tek API update needed"
+          rm -f "$PFX_PATH.new"
+          exit 0
+        fi
+        mv "$PFX_PATH.new" "$PFX_PATH"
+
+        echo "pushing new cert path into Tek settings"
+        PASS=$(cat "$CREDENTIALS_DIRECTORY/admin-pass")
+        TOKEN=$(curl -fsS "http://127.0.0.1:5380/api/user/login" \
+          --data-urlencode "user=admin" \
+          --data-urlencode "pass=$PASS" \
+          --data-urlencode "includeInfo=false" \
+          | jq -r .token)
+        if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+          echo "FATAL: failed to authenticate to Technitium" >&2
+          exit 1
+        fi
+
+        curl -fsS "http://127.0.0.1:5380/api/settings/set?token=$TOKEN" \
+          --data-urlencode "webServiceTlsCertificatePath=$PFX_PATH" \
+          --data-urlencode "webServiceTlsCertificatePassword=" \
+          --data-urlencode "webServiceUseSelfSignedTlsCertificate=false" \
+          --data-urlencode "webServiceEnableTls=true" >/dev/null
+
+        echo "cert installed; Tek will reload TLS on next request"
+        curl -fsS "http://127.0.0.1:5380/api/user/logout?token=$TOKEN" >/dev/null || true
+      '';
+    };
+
+    # Path unit: watch lego's cert dir; fire tek-cert-install on any change.
+    # PathChanged covers both atomic-rename (lego's pattern) and in-place
+    # writes. We also fire on first appearance via PathExists, so the
+    # initial issuance triggers without a separate kickoff.
+    systemd.paths.tek-cert-install = {
+      description = "Watch lego cert output; install into Technitium on change";
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathChanged = "${cfg.certPath}/certificates";
+        Unit = "tek-cert-install.service";
+      };
+    };
   };
 }
