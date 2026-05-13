@@ -49,13 +49,30 @@ in {
 
     domains = mkOption {
       type = types.listOf types.str;
-      default = (map (z: "*.${z}") dnsCfg.zones) ++ dnsCfg.zones ++ dnsCfg.publicClusterHostnames;
-      defaultText = literalExpression ''(map (z: "*.''${z}") ii-federation.dns.zones) ++ ii-federation.dns.zones ++ ii-federation.dns.publicClusterHostnames'';
+      default =
+        let
+          wildcards = map (z: "*.${z}") dnsCfg.zones;
+          apexes = dnsCfg.zones;
+          # A cluster hostname like ns.developing.coop is redundant with
+          # the wildcard *.developing.coop — LE rejects the order with
+          # "Domain name is redundant with a wildcard domain in the same
+          # request". Filter those out; keep cluster hostnames whose
+          # parent zone we DON'T cover with a wildcard (e.g. ns.ii.coop
+          # when ii.coop isn't a federation zone).
+          parentOf = h: lib.concatStringsSep "." (lib.tail (lib.splitString "." h));
+          extras = lib.filter (h: !(lib.elem (parentOf h) dnsCfg.zones))
+                              dnsCfg.publicClusterHostnames;
+        in
+          wildcards ++ apexes ++ extras;
+      defaultText = literalExpression ''
+        Wildcards + apex over ii-federation.dns.zones, plus any
+        ii-federation.dns.publicClusterHostnames whose parent zone
+        isn't already covered by a wildcard (LE rejects redundant SANs).
+      '';
       description = ''
         Domains to issue certs for. Defaults to wildcards + apex over
         every zone declared in ii-federation.dns.zones, plus any
-        publicClusterHostnames so each anchor's TLS cert covers its
-        cluster URL.
+        publicClusterHostnames not already covered by a wildcard.
       '';
     };
 
