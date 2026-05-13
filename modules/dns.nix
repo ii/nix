@@ -583,7 +583,7 @@ in {
           # Note: primaryNameServer at this endpoint applies only to
           # Secondary/Stub zones, not Primary — for Primary zones the
           # SOA MNAME is a record we update in step b2.
-          # update / updateIpAddresses + updateSecurityPolicies:
+          # update / updateSecurityPolicies:
           # Authorize RFC 2136 dynamic UPDATE messages signed with our
           # federation TSIG key for ANY name in the zone, for the
           # record types ACME DNS-01 + general DDNS automation need.
@@ -595,13 +595,20 @@ in {
           # _acme-challenge.<fqdn> for wildcard certs); A/AAAA/CNAME/
           # SRV/PTR added so the same key works for general DDNS too.
           # AXFR ACL stays as-is (zoneTransfer + zoneTransferTsigKeyNames).
+          #
+          # update=Allow is the *network-layer* gate; TSIG security
+          # policies (below) are the real authorization. We must NOT
+          # use update=Deny — Tek checks update first and short-circuits
+          # before evaluating TSIG (per ApexZone.cs / DnsServer.cs IsUpdatePermittedAsync).
+          # Valid enum values: Deny, Allow, AllowOnlyZoneNameServers,
+          # UseSpecifiedNetworkACL, AllowZoneNameServersAndUseSpecifiedNetworkACL.
           UPDATE_POLICY="$TSIG_KEY_NAME|$zone|TXT,A,AAAA,CNAME,SRV,PTR,CAA"
           api zones/options/set \
             --data-urlencode "zone=$zone" \
             --data-urlencode "notify=ZoneNameServers" \
             --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
             --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME" \
-            --data-urlencode "update=AllowOnlySpecifiedIpAddresses" \
+            --data-urlencode "update=Allow" \
             --data-urlencode "updateSecurityPolicies=$UPDATE_POLICY"
 
           # Step b2: SOA MNAME (primary nameserver) — only updates if
