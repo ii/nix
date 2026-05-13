@@ -94,6 +94,16 @@ in {
       dnsProvider = "rfc2136";
       certPath = cfg.certPath;
       credentialFile = "/run/acme-dns01/creds";
+      # Propagation check against THIS box's Tek (where lego just wrote).
+      # Skipping public resolvers avoids two problems:
+      #  - cache lag / negative caching on the very-recent UPDATE
+      #  - the parallel-primary federation: peer anchor doesn't have the
+      #    record (no inter-anchor DDNS replication), so public recursive
+      #    queries randomly hit a stale answer. Local check makes the
+      #    propagation poll deterministic. LE's own validation queries
+      #    the authoritative NSes directly, so this only affects what
+      #    lego polls before signaling "ready" to LE.
+      propagationDnsResolvers = [ "127.0.0.1:53" ];
     };
 
     # ACME must wait for the federation reconciler to finish — that's what

@@ -99,6 +99,21 @@ in {
       default = "https://acme-v02.api.letsencrypt.org/directory";
       description = "ACME directory URL.";
     };
+
+    propagationDnsResolvers = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "127.0.0.1:53" ];
+      description = ''
+        DNS resolvers lego uses to verify challenge propagation before
+        telling the ACME server to validate. Empty list uses lego's
+        defaults (system resolvers / Google + Cloudflare). Set to
+        ["127.0.0.1:53"] when this same box is the authoritative server
+        for the challenged zones — avoids the cache/anycast staleness
+        problem during the propagation poll window. Does NOT affect
+        what nameservers Let's Encrypt itself queries for validation.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -121,7 +136,9 @@ in {
               "--server" cfg.acmeServer
               "--dns" cfg.dnsProvider
               "--path" cfg.certPath
-            ] ++ (lib.concatMap (d: [ "--domains" d ]) cfg.domains));
+            ]
+            ++ (lib.concatMap (d: [ "--domains" d ]) cfg.domains)
+            ++ (lib.concatMap (r: [ "--dns.resolvers" r ]) cfg.propagationDnsResolvers));
           in
           "${pkgs.lego}/bin/lego ${args} run";
 
