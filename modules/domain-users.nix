@@ -48,6 +48,7 @@ let
   # per Gen 1 architect endorsement, director-decided 2026-05-01).
   federationRegistry = {
     hh = { uid = 31331; description = "Hippie Hacker"; };
+    hal9000 = { uid = 24932; description = "Hal Fulton"; };
     # As federation grows, append (architectural decision per addition):
     #   ash    = { uid = <gh-id>; description = "Ash"; };
     #   ben    = { uid = <gh-id>; description = "Ben"; };
