@@ -49,6 +49,8 @@ let
   federationRegistry = {
     hh = { uid = 31331; description = "Hippie Hacker"; };
     hal9000 = { uid = 24932; description = "Hal Fulton"; };
+    ixx = { uid = 26698; description = "Taylor Carpenter"; };
+    wwalker = { uid = 23478; description = "Wayne Walker"; };
     # As federation grows, append (architectural decision per addition):
     #   ash    = { uid = <gh-id>; description = "Ash"; };
     #   ben    = { uid = <gh-id>; description = "Ben"; };
