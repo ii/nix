@@ -141,21 +141,38 @@ in {
     # TSIG_KEY name must match what dns.nix installs in Technitium:
     # ii-federation-axfr (same key powers AXFR + DDNS UPDATE; UPDATE
     # authorization is granted per-zone via updateSecurityPolicies in dns.nix).
-    system.activationScripts.acme-dns01-creds = {
-      deps = [ "setupSecrets" ];
-      text = ''
-        install -d -m 0700 /run/acme-dns01
-        TSIG=$(cat ${toString dnsCfg.tsigKeyFile})
-        umask 077
-        cat > /run/acme-dns01/creds <<EOF
-        RFC2136_NAMESERVER=127.0.0.1:53
-        RFC2136_TSIG_ALGORITHM=hmac-sha256
-        RFC2136_TSIG_KEY=ii-federation-axfr
-        RFC2136_TSIG_SECRET=$TSIG
-        EOF
-        chmod 0400 /run/acme-dns01/creds
-      '';
-    };
+    #
+    # RFC2136_NAMESERVER target:
+    #  - clusterRole=primary or off: write UPDATEs locally (zones are Primary
+    #    here, the local Tek accepts them)
+    #  - clusterRole=secondary: this anchor's federation zones are catalog-
+    #    Secondary copies; the local Tek REFUSES DDNS UPDATE on Secondary
+    #    zones. Send the UPDATEs to the cluster primary instead, where the
+    #    Primary copies live; the cluster catalog IXFRs the change back to
+    #    us so the propagation check (still 127.0.0.1) sees the record.
+    system.activationScripts.acme-dns01-creds =
+      let
+        ddnsTarget =
+          if dnsCfg.clusterRole == "secondary" then
+            (assert dnsCfg.clusterPrimaryIp != "";
+              "${dnsCfg.clusterPrimaryIp}:53")
+          else
+            "127.0.0.1:53";
+      in {
+        deps = [ "setupSecrets" ];
+        text = ''
+          install -d -m 0700 /run/acme-dns01
+          TSIG=$(cat ${toString dnsCfg.tsigKeyFile})
+          umask 077
+          cat > /run/acme-dns01/creds <<EOF
+          RFC2136_NAMESERVER=${ddnsTarget}
+          RFC2136_TSIG_ALGORITHM=hmac-sha256
+          RFC2136_TSIG_KEY=ii-federation-axfr
+          RFC2136_TSIG_SECRET=$TSIG
+          EOF
+          chmod 0400 /run/acme-dns01/creds
+        '';
+      };
 
     # Renewal timer should also wait — sequenced dependency chain:
     # technitium-dns-server → technitium-federation-reconcile → acme-dns01
