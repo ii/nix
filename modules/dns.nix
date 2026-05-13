@@ -585,24 +585,34 @@ in {
           # SOA MNAME is a record we update in step b2.
           # update / updateSecurityPolicies:
           # Authorize RFC 2136 dynamic UPDATE messages signed with our
-          # federation TSIG key for ANY name in the zone, for the
-          # record types ACME DNS-01 + general DDNS automation need.
+          # federation TSIG key for the zone apex AND every subdomain,
+          # for the record types ACME DNS-01 + general DDNS automation need.
+          #
           # Format of updateSecurityPolicies: pipe-separated triples
           #   <tsigKeyName>|<domain>|<comma,sep,types>
-          # The domain '<zone>' here means the policy applies to the
-          # zone apex AND any subdomain (Tek checks .EndsWith).
-          # TXT is the critical one (cert-manager / lego writing
-          # _acme-challenge.<fqdn> for wildcard certs); A/AAAA/CNAME/
-          # SRV/PTR added so the same key works for general DDNS too.
+          # Multiple policies concatenate via the same separator
+          # (WebServiceZonesApi.cs:3577 reads groups of 3 with i += 3).
+          #
+          # Per ApexZone.cs:2680 the domain match rule is:
+          #   uRecord.Name == policy.Key (exact), OR
+          #   policy.Key.StartsWith("*.") && uRecord.Name.EndsWith(policy.Key.Substring(1))
+          # So a single "developing.coop" policy does NOT cover
+          # "_acme-challenge.developing.coop" (lego's challenge target);
+          # the wildcard "*.developing.coop" entry IS what makes ACME work.
+          # The apex entry covers DDNS at the bare zone name (e.g. SPF TXT).
+          #
+          # TXT is the critical one for ACME DNS-01. A/AAAA/CNAME/SRV/PTR/CAA
+          # added so the same key powers general DDNS automation too.
           # AXFR ACL stays as-is (zoneTransfer + zoneTransferTsigKeyNames).
           #
           # update=Allow is the *network-layer* gate; TSIG security
-          # policies (below) are the real authorization. We must NOT
-          # use update=Deny — Tek checks update first and short-circuits
-          # before evaluating TSIG (per ApexZone.cs / DnsServer.cs IsUpdatePermittedAsync).
-          # Valid enum values: Deny, Allow, AllowOnlyZoneNameServers,
-          # UseSpecifiedNetworkACL, AllowZoneNameServersAndUseSpecifiedNetworkACL.
-          UPDATE_POLICY="$TSIG_KEY_NAME|$zone|TXT,A,AAAA,CNAME,SRV,PTR,CAA"
+          # policies are the real authorization. update=Deny short-circuits
+          # before TSIG evaluation (DnsServer.cs:2649 IsUpdatePermittedAsync)
+          # so we must use Allow. Valid enum values: Deny, Allow,
+          # AllowOnlyZoneNameServers, UseSpecifiedNetworkACL,
+          # AllowZoneNameServersAndUseSpecifiedNetworkACL.
+          UPDATE_TYPES="TXT,A,AAAA,CNAME,SRV,PTR,CAA"
+          UPDATE_POLICY="$TSIG_KEY_NAME|$zone|$UPDATE_TYPES|$TSIG_KEY_NAME|*.$zone|$UPDATE_TYPES"
           api zones/options/set \
             --data-urlencode "zone=$zone" \
             --data-urlencode "notify=ZoneNameServers" \
