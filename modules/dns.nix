@@ -583,11 +583,26 @@ in {
           # Note: primaryNameServer at this endpoint applies only to
           # Secondary/Stub zones, not Primary — for Primary zones the
           # SOA MNAME is a record we update in step b2.
+          # update / updateIpAddresses + updateSecurityPolicies:
+          # Authorize RFC 2136 dynamic UPDATE messages signed with our
+          # federation TSIG key for ANY name in the zone, for the
+          # record types ACME DNS-01 + general DDNS automation need.
+          # Format of updateSecurityPolicies: pipe-separated triples
+          #   <tsigKeyName>|<domain>|<comma,sep,types>
+          # The domain '<zone>' here means the policy applies to the
+          # zone apex AND any subdomain (Tek checks .EndsWith).
+          # TXT is the critical one (cert-manager / lego writing
+          # _acme-challenge.<fqdn> for wildcard certs); A/AAAA/CNAME/
+          # SRV/PTR added so the same key works for general DDNS too.
+          # AXFR ACL stays as-is (zoneTransfer + zoneTransferTsigKeyNames).
+          UPDATE_POLICY="$TSIG_KEY_NAME|$zone|TXT,A,AAAA,CNAME,SRV,PTR,CAA"
           api zones/options/set \
             --data-urlencode "zone=$zone" \
             --data-urlencode "notify=ZoneNameServers" \
             --data-urlencode "zoneTransfer=AllowOnlySpecifiedNameServers" \
-            --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME"
+            --data-urlencode "zoneTransferTsigKeyNames=$TSIG_KEY_NAME" \
+            --data-urlencode "update=AllowOnlySpecifiedIpAddresses" \
+            --data-urlencode "updateSecurityPolicies=$UPDATE_POLICY"
 
           # Step b2: SOA MNAME (primary nameserver) — only updates if
           # different from desired. Serial must be >= current; we
