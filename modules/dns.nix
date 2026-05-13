@@ -274,6 +274,26 @@ in {
         connects to the primary. Pass this separately to bypass that.
       '';
     };
+
+    publicClusterHostnames = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "ns.ii.coop" "ns.developing.coop" ];
+      description = ''
+        Public hostnames used (or planned for use) as cluster node
+        identities. With Tek 14.3 catalog membership, the in-zone NS
+        RRset of every federated zone is auto-set to the cluster node
+        names; ergo cluster names should equal the public NS names you
+        want clients to see, AND each anchor's TLS cert must cover the
+        name it serves on its cluster HTTPS port (53443).
+
+        certs.nix consumes this list to ensure the wildcard cert SANs
+        include every cluster hostname (some may live in zones not
+        federation-managed — e.g. ns.ii.coop lives in the
+        Cloudflare-served ii.coop zone — and require an ACME CNAME
+        delegation to make DNS-01 work; see runbook).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {

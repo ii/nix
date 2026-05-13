@@ -49,11 +49,13 @@ in {
 
     domains = mkOption {
       type = types.listOf types.str;
-      default = map (z: "*.${z}") dnsCfg.zones ++ dnsCfg.zones;
-      defaultText = literalExpression ''map (z: "*.''${z}") ii-federation.dns.zones ++ ii-federation.dns.zones'';
+      default = (map (z: "*.${z}") dnsCfg.zones) ++ dnsCfg.zones ++ dnsCfg.publicClusterHostnames;
+      defaultText = literalExpression ''(map (z: "*.''${z}") ii-federation.dns.zones) ++ ii-federation.dns.zones ++ ii-federation.dns.publicClusterHostnames'';
       description = ''
         Domains to issue certs for. Defaults to wildcards + apex over
-        every zone declared in ii-federation.dns.zones.
+        every zone declared in ii-federation.dns.zones, plus any
+        publicClusterHostnames so each anchor's TLS cert covers its
+        cluster URL.
       '';
     };
 
