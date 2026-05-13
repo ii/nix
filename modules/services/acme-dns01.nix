@@ -125,8 +125,14 @@ in {
           in
           "${pkgs.lego}/bin/lego ${args} run";
 
-        # Override hardening: needs network egress + cert file write
-        StateDirectory = "acme-dns01";
+        # Override hardening: needs network egress + cert file write.
+        # StateDirectory creates certPath under /var/lib AND chowns it to
+        # the dynamic user. Required (not just nice-to-have): without it,
+        # systemd's namespace setup fails with status=226/NAMESPACE because
+        # ReadWritePaths can't bind-mount a directory that doesn't exist.
+        StateDirectory =
+          assert lib.hasPrefix "/var/lib/" cfg.certPath;
+          lib.removePrefix "/var/lib/" cfg.certPath;
         ReadWritePaths = [ cfg.certPath ];
         EnvironmentFile = cfg.credentialFile;
       };
