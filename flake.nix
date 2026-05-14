@@ -112,6 +112,20 @@
           ];
         };
 
+        # Overlay: replace nixos-24.11's maddy (0.7.1) with nixpkgs-
+        # master's (0.8.x). The federation maddy.conf (ii-mx 2026-05-14,
+        # anchors/machines/mail/maddy.conf) uses 0.8+ idioms — bare-string
+        # regex tables, `target.dispatch` module, etc. — that 0.7.1
+        # rejects with parse errors. Same overlay pattern as
+        # technitium-14; pulled in by the anchor bundle below.
+        maddy-08 = { ... }: {
+          nixpkgs.overlays = [
+            (final: prev: {
+              maddy = nixpkgs-master.legacyPackages.${prev.system}.maddy;
+            })
+          ];
+        };
+
         # Convenience: import everything legacy + federation
         default = { imports = [
           ./modules/domain-users.nix
@@ -137,6 +151,12 @@
           # catalog (required for the federation sync model in
           # dns.nix); nixos-24.11's 13.0.2 doesn't have either.
           self.nixosModules.technitium-14
+          # Pull maddy 0.8.x from nixpkgs-master via overlay. 0.8+
+          # introduced target.dispatch + bare-string regex tables that
+          # the federation maddy.conf depends on; 0.7.1 in 24.11 can't
+          # parse it. Sets up federation MX + DKIM signing + OCI
+          # smarthost end-to-end.
+          self.nixosModules.maddy-08
         ]; };
       };
 
