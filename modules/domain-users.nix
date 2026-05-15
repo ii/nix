@@ -52,6 +52,7 @@ let
     ixx = { uid = 26698; description = "Taylor Carpenter"; };
     wwalker = { uid = 23478; description = "Wayne Walker"; };
     iamfourh2e = { uid = 28683455; description = "reaksmey_kevin"; };
+    eitansuez = { uid = 1054937; description = "Eitan Suez"; };
     # As federation grows, append (architectural decision per addition):
     #   ash    = { uid = <gh-id>; description = "Ash"; };
     #   ben    = { uid = <gh-id>; description = "Ben"; };
